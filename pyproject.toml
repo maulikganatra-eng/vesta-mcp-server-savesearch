@@ -49,7 +49,7 @@ dev = [
     # hook's own copy. If the two versions differ, the same code passes locally and
     # fails in CI. scripts/check_tool_pins.py enforces the match on every commit,
     # so this is a checked invariant rather than a comment asking you to remember.
-    "ruff==0.15.15",
+    "ruff==0.16.2",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
