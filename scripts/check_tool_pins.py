@@ -31,15 +31,23 @@ PRECOMMIT = ROOT / ".pre-commit-config.yaml"
 # tool name -> the pre-commit repo URL that provides it
 TOOLS = {
     "ruff": "https://github.com/astral-sh/ruff-pre-commit",
+    "detect-secrets": "https://github.com/Yelp/detect-secrets",
 }
 
 
 def pyproject_pins() -> dict[str, str]:
     """Exact-pinned versions from the dev dependency group."""
     data = tomllib.loads(PYPROJECT.read_text())
-    dev: list[str] = data.get("dependency-groups", {}).get("dev", [])
+    dev: list[object] = data.get("dependency-groups", {}).get("dev", [])
     pins: dict[str, str] = {}
     for spec in dev:
+        # PEP 735 allows dict entries too (e.g. {"include-group": "..."}), not
+        # only plain "name==version" strings. Skip anything that isn't a string
+        # rather than crashing — this script runs as a commit-time hook on any
+        # pyproject.toml change, so an unrelated dependency-group edit must not
+        # be able to block an unrelated commit.
+        if not isinstance(spec, str):
+            continue
         m = re.fullmatch(r"([A-Za-z0-9._-]+)==([0-9][^\s;]*)", spec.strip())
         if m:
             pins[m.group(1).lower()] = m.group(2)
@@ -53,7 +61,14 @@ def precommit_revs() -> dict[str, str]:
     for raw in PRECOMMIT.read_text().splitlines():
         line = raw.strip()
         if line.startswith("- repo:"):
-            current = line.split(":", 1)[1].strip()
+            repo = line.split(":", 1)[1].strip()
+            # A "local" repo never publishes a `rev:` of its own. Treat it as
+            # "nothing to track" immediately rather than leaving `current` set
+            # to "local" until the next "- repo:" line resets it — otherwise a
+            # `rev:`-shaped string appearing anywhere inside that local block
+            # (an entry, an arg, a comment) would be silently attributed to
+            # "local" instead of the real repo it belongs to, or to nothing.
+            current = None if repo == "local" else repo
         elif line.startswith("rev:") and current:
             # Strip a leading "v" and any inline comment: `rev: v0.15.15  # note`
             rev = line.split(":", 1)[1].strip().split("#")[0].strip().strip("'\"")

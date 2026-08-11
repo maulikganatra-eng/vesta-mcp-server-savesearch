@@ -67,7 +67,24 @@ def main() -> int:
     if BASELINE.exists():
         print(f"  {OK} .secrets.baseline already present")
     else:
-        proc = run(["uv", "run", "detect-secrets", "scan"], capture=True)
+        # --exclude-files must match the detect-secrets hook's `exclude:` in
+        # .pre-commit-config.yaml. Without it, this first full-tree scan picks
+        # up hundreds of hash-like strings in uv.lock that the hook will never
+        # re-check, bloating the baseline with entries a new contributor has
+        # to manually triage on day one.
+        proc = run(
+            [
+                "uv",
+                "run",
+                "detect-secrets",
+                "scan",
+                "--exclude-files",
+                r"uv\.lock",
+                "--exclude-files",
+                r".*\.ipynb",
+            ],
+            capture=True,
+        )
         if proc.returncode == 0 and proc.stdout.strip():
             BASELINE.write_text(proc.stdout)
             print(f"  {OK} created .secrets.baseline")

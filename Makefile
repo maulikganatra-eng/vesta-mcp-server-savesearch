@@ -15,10 +15,12 @@
         hooks secrets-baseline lock outdated clean
 
 ## setup: Fresh clone -> ready to work (venv, deps, git hooks, secrets baseline)
-# Plain python3 on purpose: this is the one target that must work BEFORE a venv
-# exists, so it cannot go through `uv run`. bootstrap.py uses only the stdlib.
+# Must work BEFORE a venv exists, so it cannot go through `uv run`.
+# bootstrap.py uses only the stdlib. Tries python3 first (macOS/Linux, and
+# Windows via WSL or the py-launcher's python3 alias), falls back to python
+# (the name the official Windows installer actually puts on PATH).
 setup:
-	python3 scripts/bootstrap.py
+	@command -v python3 >/dev/null 2>&1 && python3 scripts/bootstrap.py || python scripts/bootstrap.py
 
 ## lint: ruff check, no auto-fix (what CI runs)
 lint:
@@ -38,10 +40,14 @@ type-check:
 test:
 	uv run --frozen pytest -m "not contract and not e2e"
 
-## test-cov: Fast suite with the coverage gate and an HTML report
+## test-cov: Fast suite with the coverage gate, terminal/HTML/XML reports
+# XML is for CI's artifact upload; HTML is for local browsing. One target for
+# both so the pre-commit pytest hook, this target and CI's `tests` job all run
+# literally the same command — see the note on the pytest hook in
+# .pre-commit-config.yaml.
 test-cov:
 	uv run --frozen pytest --cov --cov-report=term-missing --cov-report=html \
-		-m "not contract and not e2e"
+		--cov-report=xml -m "not contract and not e2e"
 	@echo "HTML report: htmlcov/index.html"
 
 ## test-contract: Live-service tests. Needs real credentials. Never runs in CI.
@@ -57,8 +63,12 @@ hooks:
 	uv run --frozen pre-commit run --all-files --hook-stage pre-push
 
 ## secrets-baseline: Re-audit and rewrite .secrets.baseline after a false positive
+# --exclude-files must match the detect-secrets hook's `exclude:` in
+# .pre-commit-config.yaml — otherwise this re-audit adds entries for files
+# (uv.lock, notebooks) the hook itself never re-checks at commit time.
 secrets-baseline:
-	uv run --frozen detect-secrets scan --baseline .secrets.baseline
+	uv run --frozen detect-secrets scan --baseline .secrets.baseline \
+		--exclude-files 'uv\.lock' --exclude-files '.*\.ipynb'
 	@echo "Review the diff before committing — never baseline a real secret."
 
 ## lock: Re-resolve uv.lock after editing dependencies in pyproject.toml

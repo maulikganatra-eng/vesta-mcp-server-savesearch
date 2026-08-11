@@ -42,9 +42,14 @@ dev = [
     "pytest-cov>=6.0",
     "mypy>=1.13",
     "pre-commit>=4.0",
-    # Needed as a real dependency, not only as a pre-commit hook, so that
-    # `make secrets-baseline` and scripts/bootstrap.py can generate the baseline.
-    "detect-secrets>=1.5",
+    # EXACT pin, and it must equal the detect-secrets `rev` in
+    # .pre-commit-config.yaml, for the same reason as the ruff pin above:
+    # `make secrets-baseline` and scripts/bootstrap.py use this copy to
+    # generate .secrets.baseline; the git hook uses its own isolated copy at
+    # commit time. A version drift between the two can change what counts as
+    # a false positive, so `uv sync`'s baseline generation and the hook's
+    # re-check could disagree — enforced by scripts/check_tool_pins.py.
+    "detect-secrets==1.5.0",
 ]
 
 [build-system]

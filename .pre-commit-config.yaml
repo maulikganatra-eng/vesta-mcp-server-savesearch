@@ -22,6 +22,13 @@
 # separately; it runs `pre-commit run --all-files`. In our older repos the ruff
 # version is written in both this file and ci.yml with a comment saying "bump both
 # together" — they have since drifted to 0.15.15 in one repo and 0.4.4 in another.
+#
+# No `default_language_version` pin here on purpose. Pinning it to a literal
+# `python3.11` requires that exact executable name on PATH — Windows without
+# WSL or the py-launcher alias does not provide one, breaking hook-venv creation
+# for every python-language hook. Leaving it unset makes pre-commit use the
+# interpreter it is itself running under (i.e. whatever `uv run pre-commit`
+# resolved), which is already the version-correct choice without naming one.
 # =========================================================================
 
 default_install_hook_types: [pre-commit, pre-push]
@@ -30,9 +37,6 @@ default_install_hook_types: [pre-commit, pre-push]
 # hooks would run again on push having already run on commit. Pinning the default
 # to pre-commit makes the two stages mean exactly what the comment above says.
 default_stages: [pre-commit]
-
-default_language_version:
-  python: python3.11
 
 repos:
   # -----------------------------------------------------------------------
@@ -133,10 +137,17 @@ repos:
       # mypy — whole tree, not just changed files. A type error in file A is
       # very often caused by an edit in file B, so per-file checking reports
       # the error in the wrong place or not at all.
+      #
+      # Delegates to `make type-check` rather than spelling out the command
+      # here. The exact invocation used to be duplicated verbatim across this
+      # file, the Makefile and ci.yml — the same "three places to edit, easy to
+      # miss one" problem the tool-pin check exists to catch for versions, just
+      # for command strings instead. The Makefile is now the one place that
+      # knows the command; this hook and CI's `types` job both call it.
       # ---------------------------------------------------------------
       - id: mypy
         name: mypy (strict, whole tree)
-        entry: uv run --frozen mypy
+        entry: make type-check
         language: system
         types_or: [python, pyi]
         pass_filenames: false
@@ -146,10 +157,11 @@ repos:
       # pytest — full suite plus the coverage gate from pyproject.toml.
       # `-m "not contract and not e2e"` keeps credential-hungry tests out of the
       # local hook; those are run deliberately, per the incremental build plan.
+      # Delegates to `make test-cov` for the same reason as the mypy hook above.
       # ---------------------------------------------------------------
       - id: pytest
         name: pytest + coverage gate
-        entry: uv run --frozen pytest --cov -m "not contract and not e2e"
+        entry: make test-cov
         language: system
         types_or: [python, pyi]
         pass_filenames: false
