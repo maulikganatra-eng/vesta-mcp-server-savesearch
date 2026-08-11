@@ -818,7 +818,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vesta-saved-search-mcp"
+name = "vesta-mcp-server-savesearch"
 version = "0.1.0"
 source = { editable = "." }
 
