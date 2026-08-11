@@ -2,7 +2,7 @@
 # project-specific lines are EXPOSE and CMD, both at the very bottom.
 
 # ---- Stage 1: resolve dependencies into a venv -----------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 # Pinned, not :latest. A mutable tag means two builds of the same commit can use
 # different uv versions, and it is the one uv in this repo that scripts/
@@ -36,7 +36,7 @@ COPY README.md ./
 RUN uv sync --frozen --no-dev --no-editable
 
 # ---- Stage 2: runtime ------------------------------------------------------
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # Run as a non-root user. If the process is ever compromised it should not own
 # the filesystem it is running on.
