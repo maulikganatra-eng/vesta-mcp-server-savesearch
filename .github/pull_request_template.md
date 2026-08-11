@@ -6,7 +6,9 @@ Step from the build plan (if applicable): <!-- e.g. N2 -->
 
 ## Checklist
 
-- [ ] `make check` passes locally (lint, mypy, tests + coverage gate)
+- [ ] `make check` passes locally — the three blocking CI jobs: fast hooks
+      (lint, format, secrets, version pins), strict mypy, tests + coverage gate.
+      Equivalent without make: `uv run --frozen python scripts/tasks.py check`
 - [ ] New behaviour has a test that fails without the change
 - [ ] No secret, token or real bearer value in code, tests, fixtures or commit history
 

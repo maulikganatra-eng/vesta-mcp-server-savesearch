@@ -1,24 +1,37 @@
 ### =========================================================================
-### pyproject.toml — the ONLY file with project-specific values in it.
+### pyproject.toml — almost the only file with project-specific values in it.
 ###
-### Reusing this repo as a template for a new project? Change exactly three
-### things, all in the [project] block below:
-###   1. name
-###   2. description
-###   3. the package directory under src/  (and the two paths that name it:
-###      [tool.coverage.run] source, and nothing else — everything else in this
-###      file targets "src" and "tests" generically)
+### Reusing this repo as a template? Change exactly these five values, then
+### rename the directory under src/ to match:
+###   1. [project] name
+###   2. [project] description
+###   3. [tool.hatch.build.targets.wheel] packages  -> ["src/<your_package>"]
+###   4. [tool.hatch.version] path                  -> src/<your_package>/__init__.py
+###   5. [tool.ruff.lint.isort] known-first-party   -> ["<your_package>"]
 ###
-### Every other config file in this repo is project-agnostic by construction.
-### That is deliberate: in our older repos the source path list was duplicated
-### across the Makefile, the CI workflow and .pre-commit-config.yaml, so adding
-### a directory meant editing four places and forgetting one meant it silently
-### stopped being linted.
+### Everything else here targets "src" and "tests" generically — INCLUDING
+### [tool.coverage.run] source, which must stay ["src"]. (An earlier version of
+### this comment said the package was also named in [tool.coverage.run], and that
+### there were three things to change. Both were wrong: editing coverage's source
+### breaks it, and leaving hatch's packages path stale produces an empty wheel.)
+###
+### The one other file with a project-specific value is the Dockerfile — its CMD
+### module path and EXPOSE port. docs/reusing-this-setup.md says so too.
+###
+### The generic-by-construction property is deliberate: in our older repos the
+### source path list was duplicated across the Makefile, the CI workflow and
+### .pre-commit-config.yaml, so adding a directory meant editing several places
+### and forgetting one meant it silently stopped being linted.
 ### =========================================================================
 
 [project]
 name = "vesta-mcp-server-savesearch"
-version = "0.1.0"
+# Single-sourced from the package's __version__ via [tool.hatch.version] below.
+# Written literally here AND in __init__.py, the two drifted the moment anyone
+# released: wheel metadata said one thing, `vesta_saved_search.__version__` said
+# another, and every log line and bug report named the wrong build with no test
+# or hook failing.
+dynamic = ["version"]
 description = "MCP tool server for MLS saved searches (list, propose, save, update, delete)"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -58,6 +71,13 @@ dev = [
     "types-pyyaml>=6.0",
     # packaging ships its own inline types (py.typed); no stub package needed.
     "packaging>=24.0",
+    # Runs the `audit` task, locally and in CI. A dev dependency rather than
+    # `uvx pip-audit` so its version comes from uv.lock (and Dependabot) instead
+    # of being whatever PyPI served that minute — an unpinned third-party tool
+    # executing in CI would sit oddly in a repo whose whole point is enforced
+    # pins. No exact pin: nothing here depends on its version, only on it being
+    # present, and its CVE database is fetched at run time regardless.
+    "pip-audit>=2.7",
 ]
 
 [build-system]
@@ -66,6 +86,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vesta_saved_search"]
+
+# Reads __version__ out of the package, so [project] version and the package's
+# own attribute cannot disagree.
+[tool.hatch.version]
+path = "src/vesta_saved_search/__init__.py"
 
 ### -------------------------------------------------------------------------
 ### ruff — lint + format. Replaces flake8, isort, black and pyupgrade.
@@ -120,7 +145,6 @@ ignore = [
     "S105",     # "hardcoded password" — fake tokens in fixtures
     "S106",
     "ARG",      # unused args are normal in fixtures and monkeypatch signatures
-    "PLR2004",  # magic values are fine as test expectations
     "DTZ",      # frozen naive datetimes are fine in tests
 ]
 
@@ -145,6 +169,9 @@ skip-magic-trailing-comma = false
 [tool.mypy]
 python_version = "3.11"
 files = ["src", "tests", "scripts"]
+# scripts/ is not a package; tests import its modules by name, and mypy needs
+# the same path the tests/conftest.py sys.path insertion provides.
+mypy_path = "scripts"
 strict = true
 warn_unreachable = true
 pretty = true

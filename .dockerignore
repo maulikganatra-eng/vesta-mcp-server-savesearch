@@ -1,23 +1,27 @@
-# Keep the build context small and never ship local state or credentials.
-.git
-.github
-.venv
-.mypy_cache
-.pytest_cache
-.ruff_cache
-htmlcov
-__pycache__
-*.pyc
-.coverage
-coverage.xml
-requirements.audit.txt
-.env
-.env.*
-!.env.example
-tests
-docs
-notes
-scratch
-Makefile
-.pre-commit-config.yaml
-.secrets.baseline
+# Allowlist, not a denylist.
+#
+# The previous version restated .gitignore's artefact list by hand, which drifts
+# the moment .gitignore gains an entry — the same duplication the Makefile's
+# `clean` target was fixed to stop doing. It also used bare `__pycache__` and
+# `*.pyc`, which are PATH-ANCHORED in .dockerignore and so matched only the
+# context root: src/<pkg>/__pycache__/ was being sent in the context and baked
+# into the image by `COPY src ./src`.
+#
+# Inverting removes both problems. This list mirrors the Dockerfile's COPY lines
+# exactly, so anything new is excluded by default and adding a COPY means adding
+# one line here — a change you cannot forget, because the build fails without it.
+*
+
+!pyproject.toml
+!uv.lock
+!src
+!README.md
+
+# Re-excluded inside the allowed paths: nothing gitignored should ride along
+# inside src/. These need ** because .dockerignore patterns are path-anchored.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.env

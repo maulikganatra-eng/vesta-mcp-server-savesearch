@@ -1,53 +1,69 @@
 # =========================================================================
 # CI — project-agnostic. Nothing in this file names this project, lists source
-# directories, pins a tool version, or states the Python version. Copy it into a
-# new repo unchanged.
+# directories, states a Python version, or spells out a lint/type/test command.
+# Copy it into a new repo unchanged.
 #
-# Four jobs, all independent so a red PR shows every problem at once:
+# 5 jobs, all independent so a red PR shows every problem at once:
 #   hooks   — every pre-commit hook (ruff, format, secrets, hygiene, lock, pins)
 #   types   — mypy, strict, blocking
 #   tests   — pytest + the coverage gate from pyproject.toml
+#   docker  — builds the container image (build only; never run, never pushed)
 #   audit   — dependency CVEs, advisory, plus a weekly scheduled run
 #
-# FOUR DELIBERATE CHOICES, each fixing something that went wrong in our older repos:
+# DELIBERATE CHOICES, each fixing something that went wrong in our older repos or
+# in an earlier revision of this file:
 #
 # 1. `hooks` runs pre-commit rather than installing ruff itself, so
-#    .pre-commit-config.yaml is the only place a tool version is written. The older
-#    repos pin ruff in both the workflow and the hook config with a comment saying
-#    "bump both together"; they have since drifted to 0.15.15 and 0.4.4.
+#    .pre-commit-config.yaml is the only place a HOOK tool version is written.
 #
-# 2. No actions/setup-python step. uv provisions the interpreter and reads
-#    .python-version, so the Python version is stated in exactly one file.
+# 2. No actions/setup-python step, and no job names a Python version. uv
+#    provisions the interpreter from .python-version; the audit job reads that
+#    file at run time rather than hardcoding a version.
 #
 # 3. No `needs:` chains. In the older repos `type-check` and the PR gate both wait
 #    on `lint`, so a formatting nit hides a real failure for a whole cycle.
 #
-# 4. `types` and `tests` call `scripts/tasks.py` rather than spelling out the
-#    mypy/pytest invocation here. That exact command used to be duplicated
-#    verbatim across this file, .pre-commit-config.yaml and the Makefile — the
-#    same "three places to edit, one gets missed" problem the tool-pin check
-#    (scripts/check_tool_pins.py) exists to catch for versions. Deliberately
-#    NOT `make type-check`: GNU Make is not on a stock Windows machine's PATH,
-#    confirmed empirically, so nothing on this repo's automatic path (a git
-#    hook or a CI job) may depend on `make` existing. `uv run` has no such
-#    problem — it is one binary with one name on every platform.
+# 4. Every job body is a single `scripts/tasks.py <task>` call, so the actual
+#    command lives in exactly one place and is runnable locally on any OS.
+#    Deliberately NOT `make <target>`: GNU Make is not on a stock Windows PATH,
+#    so nothing on this repo's automatic path may depend on it.
+#
+# 5. Actions are pinned by commit SHA, not tag. Tags — including patch tags — are
+#    mutable, so a tag pin is not a pin. The comment after each SHA is the human
+#    -readable version, and Dependabot updates both together.
+#
+# 6. setup-uv pins `version:` rather than defaulting to "latest". uv has a second,
+#    independent version in .pre-commit-config.yaml (astral-sh/uv-pre-commit, the
+#    `uv-lock` hook's uv). Unpinned here, a uv release that changed the lockfile
+#    format would have one side calling uv.lock fresh and the other rejecting it.
+#    scripts/check_tool_pins.py asserts the two stay equal.
 # =========================================================================
 
 name: CI
 
 on:
+  # PR-only for branch work. An earlier revision also listed the feature-branch
+  # patterns under `push`, which meant every commit on a branch with an open PR
+  # ran the whole workflow TWICE — the concurrency group cannot dedupe them
+  # because github.ref is refs/heads/<branch> for one and refs/pull/N/merge for
+  # the other. Two full runs, two seconds apart, was directly observable in the
+  # run list. Pushes to main still run, so the default branch is never untested.
   push:
-    branches: [main, "feat/**", "fix/**", "chore/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — surfaces newly published CVEs
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref so a rapid push sequence does not queue.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # head_ref on a pull_request (the branch name), github.ref otherwise, so the
+  # push and PR views of one branch share a group instead of racing.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # Never cancel a run on the default branch: two merges in quick succession
+  # would otherwise leave the first commit on main with no completed CI at all,
+  # and a scheduled run would cancel a push-to-main run sharing its group.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least privilege. The default token is broader than any job here needs.
 permissions:
@@ -60,17 +76,26 @@ jobs:
   hooks:
     name: Hooks (ruff, format, secrets, lock, pins)
     runs-on: ubuntu-latest
+    # The weekly cron exists for the audit job only. Without this guard the
+    # schedule ran every job against main each Monday — wasted minutes, and
+    # a guaranteed red CI email for a reason unrelated to CVEs, which is exactly
+    # the "trains people to ignore the result" failure the audit job warns about.
+    if: github.event_name != 'schedule'
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # detect-secrets compares against the committed baseline; full history
-          # keeps its diff-based checks meaningful on pull requests.
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v9.0.0
+          # This job downloads and executes third-party hook environments
+          # (pre-commit-hooks, detect-secrets, ruff, uv). Leaving the default
+          # would park an x-access-token in .git/config while they run, and
+          # nothing here pushes.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.8" # must equal uv-pre-commit's rev; see note 6
       - name: Cache pre-commit environments
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml', '.python-version') }}
@@ -80,9 +105,17 @@ jobs:
           restore-keys: |
             pre-commit-${{ runner.os }}-
       - name: Install project
-        # uv reads .python-version and installs the interpreter if it is absent.
         run: uv sync --frozen
       - name: Run pre-commit hooks
+        env:
+          # no-commit-to-branch is a LOCAL guard: it stops a human committing
+          # straight to main. In CI it is actively wrong. actions/checkout puts
+          # the runner on a real local branch, so on a push to main — i.e. every
+          # merge of a PR — the hook sees branch == main and fails, turning main
+          # red for doing exactly what it is supposed to do. Skipping it here
+          # loses nothing: the protection happened at commit time on the
+          # contributor's machine, and CI cannot retroactively enforce it.
+          SKIP: no-commit-to-branch
         # --hook-stage pre-commit so mypy and pytest do not also run here; they
         # have their own jobs and would otherwise run twice per CI run.
         run: >
@@ -96,17 +129,20 @@ jobs:
   types:
     name: Type check (mypy, strict)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.8"
       - run: uv sync --frozen
       - name: mypy
-        # Calls scripts/tasks.py directly, not `make` — see the note on the
-        # mypy hook in .pre-commit-config.yaml. [tool.mypy] files in
-        # pyproject.toml still means this never needs editing when a
-        # directory is added.
+        # [tool.mypy] files in pyproject.toml means this never needs editing when
+        # a directory is added.
         run: uv run --frozen python scripts/tasks.py type-check
 
   # =======================================================================
@@ -115,29 +151,35 @@ jobs:
   tests:
     name: Tests (pytest + coverage gate)
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.8"
       - run: uv sync --frozen
       - name: pytest
-        # Calls scripts/tasks.py directly — same reasoning as the mypy step
-        # above. The threshold is fail_under in [tool.coverage.report], not
-        # repeated here. `contract` and `e2e` need live credentials and are
-        # run by hand per the build plan; the task excludes them by marker,
-        # keeping CI hermetic.
+        # The threshold is fail_under in [tool.coverage.report], not repeated
+        # here. The task excludes the `contract` and `e2e` markers, which need
+        # live credentials, keeping CI hermetic.
         run: uv run --frozen python scripts/tasks.py test-cov
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage
           path: coverage.xml
-          if-no-files-found: ignore
+          # `warn`, not `ignore`: the test-cov task always writes coverage.xml, so
+          # a missing file means something broke and should be visible rather
+          # than silently accepted.
+          if-no-files-found: warn
+          retention-days: 14
 
-    # To test a second interpreter, add a matrix and pass it to uv — nothing else
-    # in this job changes:
+    # To test a second interpreter, add a matrix and pass it to uv:
     #
     #   strategy:
     #     fail-fast: false
@@ -145,39 +187,77 @@ jobs:
     #       python-version: ["3.11", "3.12"]
     #   ...
     #   - run: uv sync --frozen --python ${{ matrix.python-version }}
+    #
+    # and give the artifact a per-leg name — upload-artifact v4+ rejects two
+    # uploads with the same name in one run, so the second leg would fail:
+    #
+    #   name: coverage-${{ matrix.python-version }}
+
+  # =======================================================================
+  # Container build — build only, never pushed, never run.
+  #
+  # Without this nothing exercised the Dockerfile at all: the only part any
+  # mechanism read was its FROM lines (scripts/check_python_version.py), so the
+  # multi-stage sync, the .dockerignore/README.md interaction and the venv copy
+  # were all unverified until someone built it by hand. It is not run, because
+  # CMD points at the module step N1 has yet to create.
+  # =======================================================================
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build --progress=plain -t vesta-savedsearch:ci .
 
   # =======================================================================
   # Dependency CVEs — advisory on purpose.
   #
   # A CVE published in a transitive dependency is not the fault of whichever PR
-  # happens to be open, and blocking on it stops unrelated work. The weekly
-  # scheduled run is what surfaces these. Treat a failure as a task, not a gate.
+  # happens to be open, and blocking on it stops unrelated work. Treat a failure
+  # as a task, not a gate.
   # =======================================================================
   audit:
     name: Dependency audit (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.8"
+      - run: uv sync --frozen
       - name: pip-audit over the locked dependency set
-        # Auditing the lock file rather than the loose ranges in pyproject.toml is
-        # the point: it reports what would actually be installed.
+        # One task call, so this is runnable locally too — it used to be a
+        # multi-line shell block that only worked on a POSIX shell, and it
+        # invoked `uvx pip-audit`, fetching an unpinned third-party tool at run
+        # time. pip-audit is now a dev dependency, so uv.lock pins it.
         #
-        # --no-emit-project omits the `-e .` line. Without it pip-audit tries to
-        # BUILD this project rather than audit anything, which fails for reasons
-        # that have nothing to do with security.
-        #
-        # Dev dependencies are included deliberately. They are most of what a
-        # service like this depends on, and a CVE in a test or lint tool still runs
-        # on developer machines and on CI runners.
-        #
-        # No --strict: it promotes warnings (such as a dependency with no known
-        # vulnerability data) to failures, which for an advisory job produces noise
-        # that trains people to ignore the result.
+        # Captured to a file so the summary step below can republish it without
+        # running the audit a second time. pipefail so tee does not mask a
+        # non-zero exit from the task.
         run: |
-          uv export --frozen --no-emit-project --format requirements-txt \
-            > requirements.audit.txt
-          uvx --python 3.11 pip-audit --requirement requirements.audit.txt
+          set -o pipefail
+          uv run --frozen python scripts/tasks.py audit 2>&1 | tee audit.log
+      - name: Publish the report where it will actually be seen
+        # continue-on-error above makes this job report SUCCESS even when CVEs are
+        # found, so the log is otherwise the only signal — and nobody opens the
+        # log of a green scheduled run. The step summary puts it on the run's
+        # front page instead.
+        if: always()
+        run: |
+          {
+            echo "### Dependency audit"
+            echo
+            echo '```'
+            tail -40 audit.log 2>/dev/null || echo "(the audit step produced no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

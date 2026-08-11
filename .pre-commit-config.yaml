@@ -18,10 +18,25 @@
 # `pre-commit install` installs BOTH hook types because of
 # default_install_hook_types below — you do not have to remember a second command.
 #
-# THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR TOOL VERSIONS. CI does not pin ruff
-# separately; it runs `pre-commit run --all-files`. In our older repos the ruff
-# version is written in both this file and ci.yml with a comment saying "bump both
-# together" — they have since drifted to 0.15.15 in one repo and 0.4.4 in another.
+# THIS FILE IS THE SOURCE OF TRUTH FOR HOOK TOOL VERSIONS. CI does not pin ruff
+# separately; it runs `pre-commit run --all-files`.
+#
+# It is not the ONLY place any tool version is written, and claiming otherwise
+# would be the same wishful thinking this repo exists to remove. Three tools are
+# necessarily pinned twice, and each pair is CHECKED by
+# scripts/check_tool_pins.py rather than left to a "keep in sync" comment:
+#   * ruff and detect-secrets — here, and in pyproject.toml's dev group, because
+#     tasks.py runs them from the project venv while the hooks use pre-commit's
+#     own isolated copies
+#   * uv — here (the uv-lock hook's uv), in every setup-uv step in ci.yml, and in
+#     the Dockerfile's `COPY --from=ghcr.io/astral-sh/uv`
+#
+# For context on why this is mechanised rather than requested: both older repos
+# pin ruff twice — in .pre-commit-config.yaml and in ci.yml — with a "keep in
+# sync" comment. Within each repo the pair currently agrees, so the comment has
+# held so far. But the two repos are a year apart (0.4.4 vs 0.15.15) with
+# different default rules, and nothing anywhere would catch the intra-repo case
+# the moment it slipped.
 #
 # No `default_language_version` pin here on purpose. Pinning it to a literal
 # `python3.11` requires that exact executable name on PATH — Windows without
@@ -60,6 +75,11 @@ repos:
         # before it becomes a build that only fails in CI.
       - id: check-added-large-files
         args: [--maxkb=500]
+        # uv.lock is deliberately tracked and grows with every dependency. It is
+        # already ~180 KB with dev deps alone, so adding the real runtime deps
+        # (fastmcp, mcp, httpx, pydantic) can push it past 500 KB — at which
+        # point every commit would start failing for a file we intend to commit.
+        exclude: ^uv\.lock$
       - id: detect-private-key
       - id: debug-statements
         # stray breakpoint() / pdb.set_trace()
@@ -75,7 +95,11 @@ repos:
   # This server handles a per-user GuestSite bearer token. A token pasted into a
   # test fixture and committed is the failure that cannot be undone by a revert.
   #
-  # New audited false-positive? Re-baseline:  make secrets-baseline
+  # New false positive? Re-scan:   make secrets-baseline   (updates the baseline)
+  # Recording a human decision?    make secrets-audit      (interactive; sets is_secret)
+  # Only the second one audits. The committed baseline currently has zero
+  # findings — the one former false positive is marked at source with a
+  # `pragma: allowlist secret` comment instead, so nothing sits pending.
   # -----------------------------------------------------------------------
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
@@ -115,9 +139,10 @@ repos:
   #
   # ruff runs from two places on purpose: `make lint` uses the project venv, the
   # git hook uses pre-commit's isolated copy. Both are wanted; different VERSIONS
-  # are not, because then the same code passes locally and fails in CI. Our two
-  # older repos both carry a "bump both together" comment and have drifted a year
-  # apart, so this is enforced rather than requested.
+  # are not, because then the same code passes locally and fails in CI. Both older
+  # repos carry a "bump both together" comment for their own ruff duplication;
+  # each pair happens to agree today, but nothing there would notice if it
+  # stopped. Hence enforced here rather than requested.
   #
   # Both entries below call `uv run --frozen python scripts/tasks.py <task>`
   # directly — never `make`. GNU Make is not on a stock Windows machine's PATH
@@ -128,23 +153,31 @@ repos:
   # its own interpreter rather than relying on whatever happens to be on PATH
   # under whatever name (`python3` vs `python`, a separate Windows trap `make
   # setup` handles on its own). scripts/tasks.py is now the actual single
-  # source of truth for every command; the Makefile is an optional wrapper
+  # source of truth for every command (bar `setup`); the Makefile is an optional wrapper
   # around it, used by neither this file nor ci.yml.
   # -----------------------------------------------------------------------
   - repo: local
     hooks:
+      # Both hooks use always_run instead of a `files:` filter, on purpose.
+      #
+      # A filter would be a SECOND copy of each script's own list of files to
+      # inspect, in a different language, with nothing keeping the two in step.
+      # Teaching a script about a new location — the obvious next change to
+      # either — and forgetting the regex here would mean the new check never
+      # fires on the commit that breaks it, which is precisely when it is needed.
+      # Both run in well under a second, so there is nothing to buy by filtering.
       - id: check-tool-pins
-        name: tool pins agree (pyproject vs pre-commit)
+        name: tool versions agree across files
         entry: uv run --frozen python scripts/tasks.py check-pins
         language: system
-        files: ^(pyproject\.toml|\.pre-commit-config\.yaml)$
+        always_run: true
         pass_filenames: false
 
       - id: check-python-version
-        name: Python version agrees (pyproject vs .python-version vs Dockerfile)
+        name: Python version agrees across files
         entry: uv run --frozen python scripts/tasks.py check-python-version
         language: system
-        files: ^(pyproject\.toml|\.python-version|Dockerfile)$
+        always_run: true
         pass_filenames: false
 
   # =======================================================================

@@ -1,7 +1,8 @@
 # =========================================================================
 # Makefile — a thin, OPTIONAL convenience wrapper. Every target below just
 # calls `uv run --frozen python scripts/tasks.py <name>`, which is the actual
-# single source of truth for each command.
+# single source of truth for each command AND for each command's description.
+# `setup` is the one exception, for the reason given at that target.
 #
 # Why the indirection: .pre-commit-config.yaml and ci.yml call scripts/tasks.py
 # directly, with no `make` involved at all. GNU Make is not on a stock Windows
@@ -14,81 +15,46 @@
 #
 # If you don't have `make`, run the exact same commands directly:
 #   uv run --frozen python scripts/tasks.py <task>
+#   uv run --frozen python scripts/tasks.py help     # list every task
 #
-#   make            # same as `make help`
-#   make setup      # one command, fresh clone to ready
+# NOTE: this file deliberately carries no task DESCRIPTIONS and no help-text
+# generator. `make help` forwards to `tasks.py help`, which renders the
+# descriptions stored beside each task definition. The previous version built
+# its help output with a grep/sed/awk pipeline — none of which is on a stock
+# Windows PATH either — and kept a second copy of every description in `## `
+# comments that could drift from the real ones.
+#
+# TASKS below must match scripts/tasks.py's registry; tests/test_toolchain.py
+# asserts that it does, so a task added to one and not the other fails the suite
+# rather than being discovered by someone typing `make` and getting
+# "No rule to make target".
 # =========================================================================
 
+TASKS := lint format type-check test test-cov test-contract test-e2e check \
+         hooks hooks-commit hooks-push check-pins check-python-version \
+         secrets-baseline secrets-audit audit lock outdated clean help
+
 .DEFAULT_GOAL := help
-.PHONY: help setup lint format type-check test test-cov test-contract check \
-        hooks check-pins check-python-version secrets-baseline lock outdated clean
+.PHONY: setup $(TASKS)
 
-## setup: Fresh clone -> ready to work (venv, deps, git hooks, secrets baseline)
-# The one target that must work BEFORE a venv (and so `uv run`) exists.
-# bootstrap.py uses only the stdlib. Tries python3 first (macOS/Linux, and
-# Windows via WSL or the py-launcher's python3 alias), falls back to python
-# (the name the official Windows installer actually puts on PATH).
+# The one target that must work BEFORE a venv (and therefore `uv run`) exists,
+# so it is the only one that cannot go through tasks.py. bootstrap.py uses only
+# the standard library.
+#
+# Prefers python3 (macOS/Linux, and Windows via WSL or the py-launcher alias)
+# and falls back to python (the name the official Windows installer puts on
+# PATH). Written as if/else, NOT `command -v python3 && python3 ... || python
+# ...`: in that form the `||` branch also fires when bootstrap.py itself exits
+# non-zero, so a genuine failure (e.g. uv missing — the very first thing
+# bootstrap checks) would silently re-run the whole script under a second
+# interpreter and bury the real error under a confusing second one.
 setup:
-	@command -v python3 >/dev/null 2>&1 && python3 scripts/bootstrap.py || python scripts/bootstrap.py
+	@if command -v python3 >/dev/null 2>&1; then \
+	  python3 scripts/bootstrap.py; \
+	else \
+	  python scripts/bootstrap.py; \
+	fi
 
-## lint: ruff check, no auto-fix (what CI runs)
-lint:
-	uv run --frozen python scripts/tasks.py lint
-
-## format: Auto-fix lint violations and format
-format:
-	uv run --frozen python scripts/tasks.py format
-
-## type-check: mypy, strict
-type-check:
-	uv run --frozen python scripts/tasks.py type-check
-
-## test: Fast suite — excludes tests needing live credentials
-test:
-	uv run --frozen python scripts/tasks.py test
-
-## test-cov: Fast suite with the coverage gate, terminal/HTML/XML reports
-test-cov:
-	uv run --frozen python scripts/tasks.py test-cov
-	@echo "HTML report: htmlcov/index.html"
-
-## test-contract: Live-service tests. Needs real credentials. Never runs in CI.
-test-contract:
-	uv run --frozen python scripts/tasks.py test-contract
-
-## check: Everything CI runs, in CI's order. Run before opening a PR.
-check:
-	uv run --frozen python scripts/tasks.py check
-
-## hooks: Run every pre-commit hook over the whole tree, including pre-push ones
-hooks:
-	uv run --frozen python scripts/tasks.py hooks
-
-## check-pins: Verify tool versions agree between pyproject.toml and pre-commit
-check-pins:
-	uv run --frozen python scripts/tasks.py check-pins
-
-## check-python-version: Verify .python-version agrees with ruff/mypy/Dockerfile
-check-python-version:
-	uv run --frozen python scripts/tasks.py check-python-version
-
-## secrets-baseline: Re-audit and rewrite .secrets.baseline after a false positive
-secrets-baseline:
-	uv run --frozen python scripts/tasks.py secrets-baseline
-	@echo "Review the diff before committing — never baseline a real secret."
-
-## lock: Re-resolve uv.lock after editing dependencies in pyproject.toml
-lock:
-	uv run --frozen python scripts/tasks.py lock
-
-## outdated: Show dependencies with newer releases available
-outdated:
-	uv run --frozen python scripts/tasks.py outdated
-
-## clean: Remove every gitignored file except .venv (caches, coverage artefacts)
-clean:
-	uv run --frozen python scripts/tasks.py clean
-
-## help: Show this message
-help:
-	@grep -E '^## ' Makefile | sed 's/## //' | awk -F': ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+# One rule for every task — no per-target boilerplate to keep in step.
+$(TASKS):
+	@uv run --frozen python scripts/tasks.py $@
