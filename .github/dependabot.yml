@@ -1,0 +1,36 @@
+# Dependabot — keeps uv.lock and the GitHub Actions pins current.
+#
+# Grouped into one PR per ecosystem per week. Ungrouped Dependabot on a repo with
+# a lock file produces a PR per package, which nobody reviews and which conflicts
+# with itself on every merge.
+
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      dev-dependencies:
+        patterns: ["*"]
+        dependency-type: "development"
+      production-dependencies:
+        patterns: ["*"]
+        dependency-type: "production"
+        # Production updates stay separate so a runtime bump gets read properly
+        # rather than being skimmed alongside twelve dev-tool patches.
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"

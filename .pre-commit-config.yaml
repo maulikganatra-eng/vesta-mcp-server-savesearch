@@ -1,0 +1,164 @@
+# =========================================================================
+# .pre-commit-config.yaml — project-agnostic. Nothing below names this project.
+#
+# TWO STAGES, and the split is the point:
+#
+#   pre-commit (on every `git commit`) — only things that finish in about a
+#       second: lint, format, secret scanning, file hygiene. Cheap enough that
+#       nobody reaches for `--no-verify`.
+#
+#   pre-push (on every `git push`) — mypy over the whole tree and the full test
+#       suite with the coverage gate. Still runs before code leaves your machine,
+#       just not 30 times a day.
+#
+# Why not run tests on commit, the way our older repos do: a coverage gate on a
+# partially-staged tree is not a meaningful number, and a slow commit hook trains
+# people to bypass the hook entirely. A bypassed hook protects nothing.
+#
+# `pre-commit install` installs BOTH hook types because of
+# default_install_hook_types below — you do not have to remember a second command.
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR TOOL VERSIONS. CI does not pin ruff
+# separately; it runs `pre-commit run --all-files`. In our older repos the ruff
+# version is written in both this file and ci.yml with a comment saying "bump both
+# together" — they have since drifted to 0.15.15 in one repo and 0.4.4 in another.
+# =========================================================================
+
+default_install_hook_types: [pre-commit, pre-push]
+
+# Without this, a hook with no explicit `stages:` runs at EVERY stage, so the fast
+# hooks would run again on push having already run on commit. Pinning the default
+# to pre-commit makes the two stages mean exactly what the comment above says.
+default_stages: [pre-commit]
+
+default_language_version:
+  python: python3.11
+
+repos:
+  # -----------------------------------------------------------------------
+  # File hygiene — fast, no project knowledge required
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-ast
+      - id: check-merge-conflict
+      - id: check-case-conflict
+        # macOS is case-insensitive, Linux CI is not. Catches Foo.py vs foo.py
+        # before it becomes a build that only fails in CI.
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: debug-statements
+        # stray breakpoint() / pdb.set_trace()
+      - id: no-commit-to-branch
+        args: [--branch, main]
+        # Deliberately main only. Do not add a broad branch pattern here — in the
+        # backend repo the pattern also blocks the long-lived branch people
+        # actually work on, so it gets bypassed routinely.
+
+  # -----------------------------------------------------------------------
+  # detect-secrets — the one hook that matters most for this project.
+  #
+  # This server handles a per-user GuestSite bearer token. A token pasted into a
+  # test fixture and committed is the failure that cannot be undone by a revert.
+  #
+  # New audited false-positive? Re-baseline:  make secrets-baseline
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: (?x)^(uv\.lock|.*\.ipynb)$
+
+  # -----------------------------------------------------------------------
+  # ruff — lint then format. Config lives in pyproject.toml.
+  # No `files:` scoping needed: the src/ layout means "everything ruff finds" is
+  # already exactly what we want checked.
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+        # --exit-non-zero-on-fix fails the commit when ruff changed a file, so the
+        # dev re-stages and actually looks at the fix instead of it landing unseen.
+      - id: ruff-format
+
+  # -----------------------------------------------------------------------
+  # uv — keep uv.lock honest.
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.8
+    hooks:
+      - id: uv-lock
+        # Fails if pyproject.toml's dependencies changed without re-locking.
+        # Without this, CI's `uv sync --frozen` breaks on someone else's machine
+        # and the error points at the wrong person.
+
+  # -----------------------------------------------------------------------
+  # Tool pins must agree between pyproject.toml and this file.
+  #
+  # ruff runs from two places on purpose: `make lint` uses the project venv, the
+  # git hook uses pre-commit's isolated copy. Both are wanted; different VERSIONS
+  # are not, because then the same code passes locally and fails in CI. Our two
+  # older repos both carry a "bump both together" comment and have drifted a year
+  # apart, so this is enforced rather than requested.
+  # -----------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: check-tool-pins
+        name: tool pins agree (pyproject vs pre-commit)
+        entry: python3 scripts/check_tool_pins.py
+        language: system
+        files: ^(pyproject\.toml|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+
+  # =======================================================================
+  # PRE-PUSH ONLY from here down.
+  # =======================================================================
+
+  - repo: local
+    hooks:
+      # ---------------------------------------------------------------
+      # mypy — whole tree, not just changed files. A type error in file A is
+      # very often caused by an edit in file B, so per-file checking reports
+      # the error in the wrong place or not at all.
+      # ---------------------------------------------------------------
+      - id: mypy
+        name: mypy (strict, whole tree)
+        entry: uv run --frozen mypy
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        stages: [pre-push]
+
+      # ---------------------------------------------------------------
+      # pytest — full suite plus the coverage gate from pyproject.toml.
+      # `-m "not contract and not e2e"` keeps credential-hungry tests out of the
+      # local hook; those are run deliberately, per the incremental build plan.
+      # ---------------------------------------------------------------
+      - id: pytest
+        name: pytest + coverage gate
+        entry: uv run --frozen pytest --cov -m "not contract and not e2e"
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        stages: [pre-push]
+
+exclude: |
+  (?x)^(
+    \.venv/.*|
+    htmlcov/.*|
+    __pycache__/.*|
+    .*\.egg-info/.*
+  )$

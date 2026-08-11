@@ -1,0 +1,23 @@
+# Keep the build context small and never ship local state or credentials.
+.git
+.github
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+htmlcov
+__pycache__
+*.pyc
+.coverage
+coverage.xml
+requirements.audit.txt
+.env
+.env.*
+!.env.example
+tests
+docs
+notes
+scratch
+Makefile
+.pre-commit-config.yaml
+.secrets.baseline
