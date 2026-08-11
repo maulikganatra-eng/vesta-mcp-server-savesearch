@@ -65,7 +65,7 @@ repos:
   # File hygiene — fast, no project knowledge required
   # -----------------------------------------------------------------------
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
@@ -134,7 +134,7 @@ repos:
   # already exactly what we want checked.
   # -----------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.15
+    rev: v0.16.2
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
@@ -146,7 +146,7 @@ repos:
   # uv — keep uv.lock honest.
   # -----------------------------------------------------------------------
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.8
+    rev: 0.12.3
     hooks:
       - id: uv-lock
         # Fails if pyproject.toml's dependencies changed without re-locking.
