@@ -144,6 +144,31 @@ def precommit_revs() -> tuple[dict[str, str], list[str]]:
     return {repo: next(iter(revs)) for repo, revs in seen.items() if len(revs) == 1}, problems
 
 
+def precommit_detect_secrets_exclude() -> str | None:
+    """The detect-secrets hook's own `exclude:` regex in .pre-commit-config.yaml.
+
+    This is a genuinely different mechanism from the two things checked against
+    `secrets_baseline.EXCLUDE_FILES` below (the baseline's embedded filter
+    pattern, and the `--exclude-files` CLI flag): it is pre-commit's own file
+    filter, evaluated before the hook ever runs, and YAML cannot import a Python
+    list. secrets_baseline.py's docstring says this copy is "kept in sync by
+    hand" — which means nothing previously checked it, so EXCLUDE_FILES could
+    change and .secrets.baseline could be regenerated to match it while the
+    commit-time hook silently kept scanning (or skipping) the wrong files.
+    """
+    doc = yaml.safe_load(PRECOMMIT.read_text(**_UTF8)) or {}
+    if not isinstance(doc, dict):
+        return None
+    for entry in doc.get("repos", []):
+        if not isinstance(entry, dict) or entry.get("repo") != TOOLS["detect-secrets"]:
+            continue
+        for hook in entry.get("hooks", []):
+            if isinstance(hook, dict) and hook.get("id") == "detect-secrets":
+                exclude = hook.get("exclude")
+                return exclude if isinstance(exclude, str) else None
+    return None
+
+
 def setup_uv_versions() -> list[str]:
     """Every `version:` given to a setup-uv step in ci.yml."""
     if not CI.exists():
@@ -294,6 +319,28 @@ def main() -> int:
                     f"baseline and the scan disagree about which files count — re-run "
                     f"`tasks.py secrets-baseline` and commit the result."
                 )
+
+    # --- 5. the pre-commit hook's own exclude: regex vs EXCLUDE_FILES -------
+    # Independent of whether .secrets.baseline exists: this compares
+    # .pre-commit-config.yaml directly against secrets_baseline.py, the one
+    # copy of the three that check (4) above never touched.
+    from secrets_baseline import EXCLUDE_FILES
+
+    expected_exclude = "(?x)^(" + "|".join(EXCLUDE_FILES) + ")$"
+    actual_exclude = precommit_detect_secrets_exclude()
+    if actual_exclude is None:
+        problems.append(
+            f"{PRECOMMIT.name}: detect-secrets hook has no `exclude:` pattern, but "
+            f"secrets_baseline.EXCLUDE_FILES is {list(EXCLUDE_FILES)}. Add "
+            f'exclude: "{expected_exclude}" to the hook.'
+        )
+    elif actual_exclude != expected_exclude:
+        problems.append(
+            f"{PRECOMMIT.name} detect-secrets hook excludes {actual_exclude!r}, but "
+            f"secrets_baseline.EXCLUDE_FILES is {list(EXCLUDE_FILES)} (expected exclude: "
+            f"{expected_exclude!r}). Update whichever one is stale so the commit-time hook "
+            "and the CLI scan agree on which files to skip."
+        )
 
     if problems:
         print("Config values disagree across files:\n", file=sys.stderr)

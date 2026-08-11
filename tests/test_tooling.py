@@ -242,6 +242,34 @@ def test_baseline_has_no_unaudited_findings() -> None:
     assert not unaudited, f"unaudited baseline entries: {unaudited}"
 
 
+def test_normalize_paths_uses_forward_slashes_regardless_of_os() -> None:
+    """A baseline (re)generated on Windows must match one generated elsewhere.
+
+    detect-secrets records each finding's filename using the OS's native path
+    separator, so a Windows re-scan produced backslash-separated filenames
+    while Linux/macOS/CI produce forward-slash ones. A previously-audited
+    finding would then stop matching its old entry and reappear as new the
+    moment anyone re-baselined on Windows.
+    """
+    import json
+
+    windows_style = json.dumps(
+        {
+            "results": {
+                "scripts\\check_tool_pins.py": [
+                    {"filename": "scripts\\check_tool_pins.py", "line_number": 43}
+                ]
+            }
+        }
+    )
+    normalized = json.loads(secrets_baseline.normalize_paths(windows_style))
+    assert list(normalized["results"]) == ["scripts/check_tool_pins.py"]
+    assert (
+        normalized["results"]["scripts/check_tool_pins.py"][0]["filename"]
+        == "scripts/check_tool_pins.py"
+    )
+
+
 def test_every_task_command_is_frozen() -> None:
     """`uv run` without --frozen can silently re-lock.
 
@@ -271,6 +299,34 @@ def test_automatic_paths_never_invoke_make() -> None:
             if re.search(r"(?:^|[\s:'\"])make\s+[a-z]", code):
                 offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, "make on an automatic path:\n" + "\n".join(offenders)
+
+
+def test_precommit_hygiene_hooks_pin_their_own_stage() -> None:
+    """Every hook from pre-commit/pre-commit-hooks must set stages: [pre-commit].
+
+    That repo's manifest hardcodes `stages: [commit, push, manual]` for each of
+    its hooks, which OVERRIDES the file's `default_stages: [pre-commit]` --
+    that setting only fills in for a hook that specifies none at all, at any
+    level. Confirmed empirically: with only default_stages set,
+    `--hook-stage pre-push` still ran trailing-whitespace and friends. Losing
+    a hook's explicit override silently makes it run twice per push again.
+    """
+    import yaml
+
+    doc = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    hygiene_repos = [
+        entry
+        for entry in doc["repos"]
+        if entry.get("repo") == "https://github.com/pre-commit/pre-commit-hooks"
+    ]
+    assert hygiene_repos, "pre-commit-hooks repo block not found"
+    offenders = [
+        hook["id"]
+        for entry in hygiene_repos
+        for hook in entry["hooks"]
+        if hook.get("stages") != ["pre-commit"]
+    ]
+    assert not offenders, f"hooks missing an explicit stages: [pre-commit] override: {offenders}"
 
 
 # --------------------------------------------------------------------------

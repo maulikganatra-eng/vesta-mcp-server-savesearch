@@ -130,10 +130,14 @@ TASKS: dict[str, tuple[str, list[list[str]]]] = {
             # version comes from uv.lock (and Dependabot) instead of being whatever
             # PyPI served that minute — an unpinned third-party tool executing in CI
             # would sit oddly in a repo whose whole thesis is enforced pins.
+            # `uv export` is a uv subcommand operating on the lock file, not
+            # something that needs to run inside the project venv — unlike every
+            # other command here, it must NOT go through `uv run`. `uv run --frozen
+            # uv export` would spawn a `uv run` process purely to re-invoke `uv`
+            # itself for no benefit; the meaningful `--frozen` (which tells `export`
+            # to use the lock file as-is) is the one already passed to `export`
+            # below.
             [
-                "uv",
-                "run",
-                "--frozen",
                 "uv",
                 "export",
                 "--frozen",

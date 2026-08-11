@@ -115,12 +115,34 @@ def dockerfile_versions() -> list[tuple[int, str]]:
     if not DOCKERFILE.exists():
         return []
     found: list[tuple[int, str]] = []
-    for lineno, line in enumerate(DOCKERFILE.read_text(**_UTF8).splitlines(), start=1):
-        if not re.match(r"^\s*FROM\b", line, flags=re.IGNORECASE):
-            continue
+    for lineno, line in _dockerfile_from_lines():
         m = re.search(r"\bpython:(\d+\.\d+)", line)
         if m:
             found.append((lineno, m.group(1)))
+    return found
+
+
+def _dockerfile_from_lines() -> list[tuple[int, str]]:
+    """(line number, raw line) for every `FROM` line that references `python`,
+    whether or not a literal `X.Y` tag could be extracted from it.
+
+    Used to distinguish "this Dockerfile has no python stage at all" from "this
+    Dockerfile has a python stage whose tag we could not parse" (an
+    ARG-substituted tag, say). dockerfile_versions() alone cannot tell those
+    apart: a build with one literally-pinned stage and one ARG-substituted
+    stage returns a non-empty list from that function, so the one check that
+    guarded against an unrecognised FROM form only firing when the list was
+    completely EMPTY let the ARG-substituted stage's drift go unnoticed as
+    long as at least one other stage still matched.
+    """
+    if not DOCKERFILE.exists():
+        return []
+    found: list[tuple[int, str]] = []
+    for lineno, line in enumerate(DOCKERFILE.read_text(**_UTF8).splitlines(), start=1):
+        if not re.match(r"^\s*FROM\b", line, flags=re.IGNORECASE):
+            continue
+        if re.search(r"\bpython\b", line, flags=re.IGNORECASE):
+            found.append((lineno, line.strip()))
     return found
 
 
@@ -167,15 +189,29 @@ def main() -> int:
         )
 
     docker = dockerfile_versions()
-    if DOCKERFILE.exists() and not docker:
+    python_from_lines = _dockerfile_from_lines()
+    if DOCKERFILE.exists() and not python_from_lines:
         # A silent pass here would be the worst outcome: it is exactly what an
         # unrecognised FROM form (an ARG-substituted tag, say) produces, and that
         # refactor is the moment this check is most needed.
         problems.append(
-            "Dockerfile exists but no `FROM ... python:X.Y` line was found. If the tag is "
+            "Dockerfile exists but no `FROM ... python` line was found. If the tag is "
             "built from an ARG, this check cannot see it — pin it literally, or teach "
             "dockerfile_versions() the new form."
         )
+    # A Dockerfile can have one stage that parses fine and another that does not
+    # (e.g. one literal `python:3.11-slim` stage and one `python:${PY}-slim`
+    # stage). dockerfile_versions() alone would silently skip the second stage
+    # rather than report it, because the list is non-empty overall. Flag every
+    # python-referencing FROM line whose tag dockerfile_versions() could not parse.
+    parsed_linenos = {lineno for lineno, _ in docker}
+    for lineno, raw in python_from_lines:
+        if lineno not in parsed_linenos:
+            problems.append(
+                f"Dockerfile:{lineno} references python but no literal `X.Y` tag could be "
+                f"parsed from {raw!r}. If the tag is built from an ARG, pin it literally, or "
+                "teach dockerfile_versions() the new form."
+            )
     for lineno, docker_v in docker:
         if docker_v != canonical:
             problems.append(
