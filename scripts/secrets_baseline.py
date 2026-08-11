@@ -28,6 +28,7 @@ Only the second one audits anything.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -69,6 +70,28 @@ def _exclude_args() -> list[str]:
     return args
 
 
+def normalize_paths(text: str) -> str:
+    """Rewrite a baseline's filenames to forward slashes, regardless of OS.
+
+    detect-secrets records each finding's filename using the OS's native path
+    separator. A baseline (re)generated on Windows therefore uses backslashes
+    while one generated on Linux/macOS/CI uses forward slashes — so a Windows
+    re-scan does not recognise a Linux-generated baseline's entry as the same
+    finding, reintroducing an already-audited false positive as a brand-new
+    one. Normalizing means the committed file is identical no matter which OS
+    produced it.
+    """
+    data = json.loads(text)
+    normalized: dict[str, list[dict[str, object]]] = {}
+    for filename, findings in data.get("results", {}).items():
+        for finding in findings:
+            if isinstance(finding.get("filename"), str):
+                finding["filename"] = finding["filename"].replace("\\", "/")
+        normalized[filename.replace("\\", "/")] = findings
+    data["results"] = normalized
+    return json.dumps(data, indent=2) + "\n"
+
+
 def main(argv: list[str]) -> int:
     # cwd=ROOT and a ROOT-relative baseline: without them, running this script
     # from a subdirectory scanned that subdirectory and wrote a stray baseline
@@ -80,7 +103,18 @@ def main(argv: list[str]) -> int:
         baseline = argv[0] if argv else ".secrets.baseline"
     target = str((ROOT / baseline).resolve())
     cmd = build_audit_command(target) if audit else build_scan_command(baseline=target)
-    return subprocess.run(cmd, cwd=ROOT, check=False).returncode
+    returncode = subprocess.run(cmd, cwd=ROOT, check=False).returncode
+
+    # `audit` only flips is_secret on existing entries in place — it never
+    # touches filenames — so normalizing there would be a no-op at best.
+    target_path = Path(target)
+    if not audit and returncode == 0 and target_path.exists():
+        target_path.write_text(
+            normalize_paths(target_path.read_text(encoding="utf-8")),
+            encoding="utf-8",
+            newline="\n",
+        )
+    return returncode
 
 
 if __name__ == "__main__":

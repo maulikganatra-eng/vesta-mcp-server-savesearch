@@ -50,7 +50,14 @@ default_install_hook_types: [pre-commit, pre-push]
 
 # Without this, a hook with no explicit `stages:` runs at EVERY stage, so the fast
 # hooks would run again on push having already run on commit. Pinning the default
-# to pre-commit makes the two stages mean exactly what the comment above says.
+# to pre-commit makes the two stages mean exactly what the comment above says —
+# EXCEPT for a hook whose own manifest already sets `stages:`, because
+# default_stages only fills in for a hook that specifies none at all, at any
+# level. pre-commit/pre-commit-hooks' manifest hardcodes `stages: [commit, push,
+# manual]` for every hook below (confirmed empirically: `--hook-stage pre-push`
+# still ran trailing-whitespace et al. with only default_stages set) — each one
+# below gets its own explicit override instead, which unlike default_stages
+# always wins over the hook's own manifest value.
 default_stages: [pre-commit]
 
 repos:
@@ -62,17 +69,26 @@ repos:
     hooks:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf]
+        stages: [pre-commit]
       - id: check-yaml
+        stages: [pre-commit]
       - id: check-toml
+        stages: [pre-commit]
       - id: check-json
+        stages: [pre-commit]
       - id: check-ast
+        stages: [pre-commit]
       - id: check-merge-conflict
+        stages: [pre-commit]
       - id: check-case-conflict
         # macOS is case-insensitive, Linux CI is not. Catches Foo.py vs foo.py
         # before it becomes a build that only fails in CI.
+        stages: [pre-commit]
       - id: check-added-large-files
         args: [--maxkb=500]
         # uv.lock is deliberately tracked and grows with every dependency. It is
@@ -80,11 +96,15 @@ repos:
         # (fastmcp, mcp, httpx, pydantic) can push it past 500 KB — at which
         # point every commit would start failing for a file we intend to commit.
         exclude: ^uv\.lock$
+        stages: [pre-commit]
       - id: detect-private-key
+        stages: [pre-commit]
       - id: debug-statements
         # stray breakpoint() / pdb.set_trace()
+        stages: [pre-commit]
       - id: no-commit-to-branch
         args: [--branch, main]
+        stages: [pre-commit]
         # Deliberately main only. Do not add a broad branch pattern here — in the
         # backend repo the pattern also blocks the long-lived branch people
         # actually work on, so it gets bypassed routinely.

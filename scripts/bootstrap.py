@@ -111,7 +111,12 @@ def _step_secrets_baseline() -> bool:
         # first commit — rewriting the baseline and failing that commit, which is
         # exactly the day-one surprise .gitattributes exists to prevent.
         # encoding="utf-8" for the same reason it is set on every read below.
-        BASELINE.write_text(proc.stdout, encoding="utf-8", newline="\n")
+        # normalize_paths() so a baseline generated on Windows uses the same
+        # forward-slash filenames one generated on Linux/macOS/CI would — see
+        # its docstring for what breaks otherwise.
+        BASELINE.write_text(
+            secrets_baseline.normalize_paths(proc.stdout), encoding="utf-8", newline="\n"
+        )
         print(f"  {OK} created .secrets.baseline")
         print(
             f"     {_dim('Commit it. Re-run the secrets-baseline task after a new')}"
