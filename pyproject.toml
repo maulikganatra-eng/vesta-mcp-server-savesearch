@@ -1,0 +1,229 @@
+### =========================================================================
+### pyproject.toml — almost the only file with project-specific values in it.
+###
+### Reusing this repo as a template? Change exactly these five values, then
+### rename the directory under src/ to match:
+###   1. [project] name
+###   2. [project] description
+###   3. [tool.hatch.build.targets.wheel] packages  -> ["src/<your_package>"]
+###   4. [tool.hatch.version] path                  -> src/<your_package>/__init__.py
+###   5. [tool.ruff.lint.isort] known-first-party   -> ["<your_package>"]
+###
+### Everything else here targets "src" and "tests" generically — INCLUDING
+### [tool.coverage.run] source, which must stay ["src"]. (An earlier version of
+### this comment said the package was also named in [tool.coverage.run], and that
+### there were three things to change. Both were wrong: editing coverage's source
+### breaks it, and leaving hatch's packages path stale produces an empty wheel.)
+###
+### The one other file with a project-specific value is the Dockerfile — its CMD
+### module path and EXPOSE port. docs/reusing-this-setup.md says so too.
+###
+### The generic-by-construction property is deliberate: in our older repos the
+### source path list was duplicated across the Makefile, the CI workflow and
+### .pre-commit-config.yaml, so adding a directory meant editing several places
+### and forgetting one meant it silently stopped being linted.
+### =========================================================================
+
+[project]
+name = "vesta-mcp-server-savesearch"
+# Single-sourced from the package's __version__ via [tool.hatch.version] below.
+# Written literally here AND in __init__.py, the two drifted the moment anyone
+# released: wheel metadata said one thing, `vesta_saved_search.__version__` said
+# another, and every log line and bug report named the wrong build with no test
+# or hook failing.
+dynamic = ["version"]
+description = "MCP tool server for MLS saved searches (list, propose, save, update, delete)"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    # Runtime deps go here. Kept empty until the first real step (N1) needs one,
+    # so `uv sync` on a fresh clone is instant and the lock file starts small.
+]
+
+[dependency-groups]
+# uv installs these with `uv sync` by default and excludes them from the built
+# wheel. This replaces requirements-dev.txt — one dependency system, not two.
+dev = [
+    # EXACT pin, and it must equal the ruff-pre-commit `rev` in
+    # .pre-commit-config.yaml. `make lint` uses this copy; the git hook uses the
+    # hook's own copy. If the two versions differ, the same code passes locally and
+    # fails in CI. scripts/check_tool_pins.py enforces the match on every commit,
+    # so this is a checked invariant rather than a comment asking you to remember.
+    "ruff==0.15.15",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    # EXACT pin, and it must equal the detect-secrets `rev` in
+    # .pre-commit-config.yaml, for the same reason as the ruff pin above:
+    # `make secrets-baseline` and scripts/bootstrap.py use this copy to
+    # generate .secrets.baseline; the git hook uses its own isolated copy at
+    # commit time. A version drift between the two can change what counts as
+    # a false positive, so `uv sync`'s baseline generation and the hook's
+    # re-check could disagree — enforced by scripts/check_tool_pins.py.
+    "detect-secrets==1.5.0",
+    # Used directly by scripts/check_tool_pins.py (real YAML parsing instead of
+    # hand-rolled line matching) and scripts/check_python_version.py. No pin
+    # needed — these are parsing libraries, not something whose *version* this
+    # repo's correctness depends on the way ruff's or detect-secrets' does.
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
+    # packaging ships its own inline types (py.typed); no stub package needed.
+    "packaging>=24.0",
+    # Runs the `audit` task, locally and in CI. A dev dependency rather than
+    # `uvx pip-audit` so its version comes from uv.lock (and Dependabot) instead
+    # of being whatever PyPI served that minute — an unpinned third-party tool
+    # executing in CI would sit oddly in a repo whose whole point is enforced
+    # pins. No exact pin: nothing here depends on its version, only on it being
+    # present, and its CVE database is fetched at run time regardless.
+    "pip-audit>=2.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vesta_saved_search"]
+
+# Reads __version__ out of the package, so [project] version and the package's
+# own attribute cannot disagree.
+[tool.hatch.version]
+path = "src/vesta_saved_search/__init__.py"
+
+### -------------------------------------------------------------------------
+### ruff — lint + format. Replaces flake8, isort, black and pyupgrade.
+###
+### This repo starts with NO legacy ignores. Our older repos carry a ~40-line
+### ignore list because rules were switched on after the code was written. A new
+### repo gets to be strict from the first commit, which is the whole advantage
+### of greenfield — do not paste that list in here.
+### -------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 105
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "C4",       # comprehensions
+    "UP",       # pyupgrade
+    "RUF",      # ruff-specific
+    "SIM",      # simplify
+    "PTH",      # use pathlib
+    "N",        # naming
+    "ARG",      # unused arguments
+    "DTZ",      # timezone-aware datetimes
+    "LOG", "G", # logging correctness
+    "T20",      # no print()
+    "S",        # bandit security rules
+    "ASYNC",    # async correctness
+]
+
+ignore = [
+    # The GuestSite and MLS APIs use camelCase JSON keys (searchFilters, esQuery,
+    # savedSearchId). Pydantic models mirror those keys exactly, so renaming them
+    # to snake_case would break the wire contract.
+    "N815",  # mixed-case variable in class scope
+    "N803",  # argument name should be lowercase
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**" = [
+    "T20",      # these are CLI helpers; printing to the terminal is the whole job
+    "S603",     # subprocess calls with a fixed, non-user-supplied argv list
+    "S607",     # ditto — resolving `uv` from PATH is intended
+]
+"tests/**" = [
+    "S101",     # assert is how pytest works
+    "S105",     # "hardcoded password" — fake tokens in fixtures
+    "S106",
+    "ARG",      # unused args are normal in fixtures and monkeypatch signatures
+    "DTZ",      # frozen naive datetimes are fine in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vesta_saved_search"]
+force-sort-within-sections = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+### -------------------------------------------------------------------------
+### mypy — strict from day one.
+###
+### Our backend repo runs mypy as `continue-on-error: true` in CI because it has
+### existing type debt that was never triaged. A new repo has none, so strict is
+### free here and expensive later. Relax a specific rule if it earns its keep;
+### do not turn strict off wholesale.
+### -------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests", "scripts"]
+# scripts/ is not a package; tests import its modules by name, and mypy needs
+# the same path the tests/conftest.py sys.path insertion provides.
+mypy_path = "scripts"
+strict = true
+warn_unreachable = true
+pretty = true
+
+[[tool.mypy.overrides]]
+# FastMCP and the MCP SDK ship incomplete stubs. Scope the exemption to those
+# modules rather than setting ignore_missing_imports globally — a global setting
+# also silences typos in our own import paths.
+module = ["mcp.*", "fastmcp.*"]
+ignore_missing_imports = true
+
+### -------------------------------------------------------------------------
+### pytest
+### -------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = ["--strict-markers", "--strict-config", "--tb=short", "-q"]
+markers = [
+    "unit: fast, everything mocked",
+    "component: real app over a real MCP client, external HTTP faked",
+    "contract: hits a live external service — needs credentials, not run in CI",
+    "e2e: full stack, slowest",
+]
+# Turn warnings into failures so a deprecation is a task, not a slow surprise.
+filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
+
+### -------------------------------------------------------------------------
+### coverage
+###
+### fail_under lives HERE and nowhere else. In our older repos the threshold is
+### written into the CI args, the Makefile and the pre-commit entry, so the three
+### can disagree. Any `pytest --cov` run picks this up automatically.
+### -------------------------------------------------------------------------
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["*/__pycache__/*", "*/.venv/*"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"

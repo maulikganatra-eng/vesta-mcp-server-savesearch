@@ -1,0 +1,248 @@
+# =========================================================================
+# .pre-commit-config.yaml — project-agnostic. Nothing below names this project.
+#
+# TWO STAGES, and the split is the point:
+#
+#   pre-commit (on every `git commit`) — only things that finish in about a
+#       second: lint, format, secret scanning, file hygiene. Cheap enough that
+#       nobody reaches for `--no-verify`.
+#
+#   pre-push (on every `git push`) — mypy over the whole tree and the full test
+#       suite with the coverage gate. Still runs before code leaves your machine,
+#       just not 30 times a day.
+#
+# Why not run tests on commit, the way our older repos do: a coverage gate on a
+# partially-staged tree is not a meaningful number, and a slow commit hook trains
+# people to bypass the hook entirely. A bypassed hook protects nothing.
+#
+# `pre-commit install` installs BOTH hook types because of
+# default_install_hook_types below — you do not have to remember a second command.
+#
+# THIS FILE IS THE SOURCE OF TRUTH FOR HOOK TOOL VERSIONS. CI does not pin ruff
+# separately; it runs `pre-commit run --all-files`.
+#
+# It is not the ONLY place any tool version is written, and claiming otherwise
+# would be the same wishful thinking this repo exists to remove. Three tools are
+# necessarily pinned twice, and each pair is CHECKED by
+# scripts/check_tool_pins.py rather than left to a "keep in sync" comment:
+#   * ruff and detect-secrets — here, and in pyproject.toml's dev group, because
+#     tasks.py runs them from the project venv while the hooks use pre-commit's
+#     own isolated copies
+#   * uv — here (the uv-lock hook's uv), in every setup-uv step in ci.yml, and in
+#     the Dockerfile's `COPY --from=ghcr.io/astral-sh/uv`
+#
+# For context on why this is mechanised rather than requested: both older repos
+# pin ruff twice — in .pre-commit-config.yaml and in ci.yml — with a "keep in
+# sync" comment. Within each repo the pair currently agrees, so the comment has
+# held so far. But the two repos are a year apart (0.4.4 vs 0.15.15) with
+# different default rules, and nothing anywhere would catch the intra-repo case
+# the moment it slipped.
+#
+# No `default_language_version` pin here on purpose. Pinning it to a literal
+# `python3.11` requires that exact executable name on PATH — Windows without
+# WSL or the py-launcher alias does not provide one, breaking hook-venv creation
+# for every python-language hook. Leaving it unset makes pre-commit use the
+# interpreter it is itself running under (i.e. whatever `uv run pre-commit`
+# resolved), which is already the version-correct choice without naming one.
+# =========================================================================
+
+default_install_hook_types: [pre-commit, pre-push]
+
+# Without this, a hook with no explicit `stages:` runs at EVERY stage, so the fast
+# hooks would run again on push having already run on commit. Pinning the default
+# to pre-commit makes the two stages mean exactly what the comment above says —
+# EXCEPT for a hook whose own manifest already sets `stages:`, because
+# default_stages only fills in for a hook that specifies none at all, at any
+# level. pre-commit/pre-commit-hooks' manifest hardcodes `stages: [commit, push,
+# manual]` for every hook below (confirmed empirically: `--hook-stage pre-push`
+# still ran trailing-whitespace et al. with only default_stages set) — each one
+# below gets its own explicit override instead, which unlike default_stages
+# always wins over the hook's own manifest value.
+default_stages: [pre-commit]
+
+repos:
+  # -----------------------------------------------------------------------
+  # File hygiene — fast, no project knowledge required
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        stages: [pre-commit]
+      - id: check-yaml
+        stages: [pre-commit]
+      - id: check-toml
+        stages: [pre-commit]
+      - id: check-json
+        stages: [pre-commit]
+      - id: check-ast
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: check-case-conflict
+        # macOS is case-insensitive, Linux CI is not. Catches Foo.py vs foo.py
+        # before it becomes a build that only fails in CI.
+        stages: [pre-commit]
+      - id: check-added-large-files
+        args: [--maxkb=500]
+        # uv.lock is deliberately tracked and grows with every dependency. It is
+        # already ~180 KB with dev deps alone, so adding the real runtime deps
+        # (fastmcp, mcp, httpx, pydantic) can push it past 500 KB — at which
+        # point every commit would start failing for a file we intend to commit.
+        exclude: ^uv\.lock$
+        stages: [pre-commit]
+      - id: detect-private-key
+        stages: [pre-commit]
+      - id: debug-statements
+        # stray breakpoint() / pdb.set_trace()
+        stages: [pre-commit]
+      - id: no-commit-to-branch
+        args: [--branch, main]
+        stages: [pre-commit]
+        # Deliberately main only. Do not add a broad branch pattern here — in the
+        # backend repo the pattern also blocks the long-lived branch people
+        # actually work on, so it gets bypassed routinely.
+
+  # -----------------------------------------------------------------------
+  # detect-secrets — the one hook that matters most for this project.
+  #
+  # This server handles a per-user GuestSite bearer token. A token pasted into a
+  # test fixture and committed is the failure that cannot be undone by a revert.
+  #
+  # New false positive? Re-scan:   make secrets-baseline   (updates the baseline)
+  # Recording a human decision?    make secrets-audit      (interactive; sets is_secret)
+  # Only the second one audits. The committed baseline currently has zero
+  # findings — the one former false positive is marked at source with a
+  # `pragma: allowlist secret` comment instead, so nothing sits pending.
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: (?x)^(uv\.lock|.*\.ipynb)$
+
+  # -----------------------------------------------------------------------
+  # ruff — lint then format. Config lives in pyproject.toml.
+  # No `files:` scoping needed: the src/ layout means "everything ruff finds" is
+  # already exactly what we want checked.
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+        # --exit-non-zero-on-fix fails the commit when ruff changed a file, so the
+        # dev re-stages and actually looks at the fix instead of it landing unseen.
+      - id: ruff-format
+
+  # -----------------------------------------------------------------------
+  # uv — keep uv.lock honest.
+  # -----------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.8
+    hooks:
+      - id: uv-lock
+        # Fails if pyproject.toml's dependencies changed without re-locking.
+        # Without this, CI's `uv sync --frozen` breaks on someone else's machine
+        # and the error points at the wrong person.
+
+  # -----------------------------------------------------------------------
+  # Tool pins must agree between pyproject.toml and this file, and the Python
+  # version must agree across .python-version / ruff / mypy / the Dockerfile.
+  #
+  # ruff runs from two places on purpose: `make lint` uses the project venv, the
+  # git hook uses pre-commit's isolated copy. Both are wanted; different VERSIONS
+  # are not, because then the same code passes locally and fails in CI. Both older
+  # repos carry a "bump both together" comment for their own ruff duplication;
+  # each pair happens to agree today, but nothing there would notice if it
+  # stopped. Hence enforced here rather than requested.
+  #
+  # Both entries below call `uv run --frozen python scripts/tasks.py <task>`
+  # directly — never `make`. GNU Make is not on a stock Windows machine's PATH
+  # (Python + Git for Windows only, no WSL/MinGW/choco make) — confirmed
+  # empirically, and it broke every commit the moment these hooks were changed
+  # to run `make <target>` instead of the command itself. `uv run` has no such
+  # problem: it is one binary with one name on every platform, and it resolves
+  # its own interpreter rather than relying on whatever happens to be on PATH
+  # under whatever name (`python3` vs `python`, a separate Windows trap `make
+  # setup` handles on its own). scripts/tasks.py is now the actual single
+  # source of truth for every command (bar `setup`); the Makefile is an optional wrapper
+  # around it, used by neither this file nor ci.yml.
+  # -----------------------------------------------------------------------
+  - repo: local
+    hooks:
+      # Both hooks use always_run instead of a `files:` filter, on purpose.
+      #
+      # A filter would be a SECOND copy of each script's own list of files to
+      # inspect, in a different language, with nothing keeping the two in step.
+      # Teaching a script about a new location — the obvious next change to
+      # either — and forgetting the regex here would mean the new check never
+      # fires on the commit that breaks it, which is precisely when it is needed.
+      # Both run in well under a second, so there is nothing to buy by filtering.
+      - id: check-tool-pins
+        name: tool versions agree across files
+        entry: uv run --frozen python scripts/tasks.py check-pins
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      - id: check-python-version
+        name: Python version agrees across files
+        entry: uv run --frozen python scripts/tasks.py check-python-version
+        language: system
+        always_run: true
+        pass_filenames: false
+
+  # =======================================================================
+  # PRE-PUSH ONLY from here down.
+  # =======================================================================
+
+  - repo: local
+    hooks:
+      # ---------------------------------------------------------------
+      # mypy — whole tree, not just changed files. A type error in file A is
+      # very often caused by an edit in file B, so per-file checking reports
+      # the error in the wrong place or not at all.
+      #
+      # Calls scripts/tasks.py rather than spelling out the command here or
+      # going through `make` — see the note above the check-tool-pins hook for
+      # why `make` is never used on this path. tasks.py is the one place that
+      # knows the actual mypy invocation; this hook and CI's `types` job both
+      # call it, so they cannot drift from each other.
+      # ---------------------------------------------------------------
+      - id: mypy
+        name: mypy (strict, whole tree)
+        entry: uv run --frozen python scripts/tasks.py type-check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        stages: [pre-push]
+
+      # ---------------------------------------------------------------
+      # pytest — full suite plus the coverage gate from pyproject.toml.
+      # `-m "not contract and not e2e"` keeps credential-hungry tests out of the
+      # local hook; those are run deliberately, per the incremental build plan.
+      # Same reasoning as the mypy hook above.
+      # ---------------------------------------------------------------
+      - id: pytest
+        name: pytest + coverage gate
+        entry: uv run --frozen python scripts/tasks.py test-cov
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        stages: [pre-push]
+
+exclude: |
+  (?x)^(
+    \.venv/.*|
+    htmlcov/.*|
+    __pycache__/.*|
+    .*\.egg-info/.*
+  )$
