@@ -117,49 +117,25 @@ TASKS: dict[str, tuple[str, list[list[str]]]] = {
         [["uv", "run", "--frozen", "pytest", "-m", "e2e", "-v"]],
     ),
     "audit": (
-        "Report known CVEs in the locked dependency set (what CI's audit job runs)",
+        "Report known CVEs in the installed dependency set",
         [
-            # Two steps: export the lock to a fully-pinned requirements file, then
-            # audit that. Auditing the lock rather than pyproject's loose ranges is
-            # the point — it reports what would actually be installed.
+            # Audits the INSTALLED environment, which `uv sync --frozen` built from
+            # uv.lock — so this reports what would actually be installed, which was
+            # the point of auditing the lock rather than pyproject's loose ranges.
             #
-            # --no-emit-project omits the `-e .` line; without it pip-audit tries to
-            # BUILD this project rather than audit anything.
+            # This replaced a two-step `uv export` -> `pip-audit --requirement`
+            # pipeline. That form made pip-audit build a throwaway environment to
+            # re-resolve the requirements file, which aborts in ensurepip on macOS —
+            # so `make audit` was broken locally while a comment claimed --no-deps
+            # avoided exactly that. One command, no generated file, works on every OS.
             #
-            # pip-audit is a dev dependency rather than `uvx pip-audit` so its
-            # version comes from uv.lock (and Dependabot) instead of being whatever
-            # PyPI served that minute — an unpinned third-party tool executing in CI
-            # would sit oddly in a repo whose whole thesis is enforced pins.
-            # `uv export` is a uv subcommand operating on the lock file, not
-            # something that needs to run inside the project venv — unlike every
-            # other command here, it must NOT go through `uv run`. `uv run --frozen
-            # uv export` would spawn a `uv run` process purely to re-invoke `uv`
-            # itself for no benefit; the meaningful `--frozen` (which tells `export`
-            # to use the lock file as-is) is the one already passed to `export`
-            # below.
-            [
-                "uv",
-                "export",
-                "--frozen",
-                "--no-emit-project",
-                "--format",
-                "requirements-txt",
-                "-o",
-                "requirements.audit.txt",
-            ],
-            [
-                "uv",
-                "run",
-                "--frozen",
-                "pip-audit",
-                "--requirement",
-                "requirements.audit.txt",
-                # The export is already fully pinned and hashed, so there is nothing
-                # to resolve; --no-deps skips building a throwaway environment to
-                # re-resolve it, which is both faster and avoids a local ensurepip
-                # failure on macOS.
-                "--no-deps",
-            ],
+            # pip-audit is a dev dependency rather than `uvx pip-audit` so its version
+            # comes from uv.lock (and Dependabot) instead of being whatever PyPI served
+            # that minute.
+            #
+            # The project itself is reported as skipped ("not found on PyPI"), which is
+            # correct and harmless — it is the local package, not a dependency.
+            ["uv", "run", "--frozen", "pip-audit"],
         ],
     ),
     "check-pins": (

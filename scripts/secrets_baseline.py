@@ -70,25 +70,47 @@ def _exclude_args() -> list[str]:
     return args
 
 
-def normalize_paths(text: str) -> str:
-    """Rewrite a baseline's filenames to forward slashes, regardless of OS.
+def _portable(path: str) -> str:
+    """Forward slashes, and repo-relative if the path is inside the repo.
 
-    detect-secrets records each finding's filename using the OS's native path
-    separator. A baseline (re)generated on Windows therefore uses backslashes
-    while one generated on Linux/macOS/CI uses forward slashes — so a Windows
-    re-scan does not recognise a Linux-generated baseline's entry as the same
-    finding, reintroducing an already-audited false positive as a brand-new
-    one. Normalizing means the committed file is identical no matter which OS
-    produced it.
+    Two separate machine-dependencies to remove, both of which end up in a
+    COMMITTED file:
+
+    * the separator — detect-secrets records filenames with the OS's native one,
+      so a Windows re-scan writes backslashes where Linux/macOS/CI write forward
+      slashes, and neither recognises the other's entries as the same finding.
+    * the prefix — when scanned with `--baseline`, detect-secrets records an
+      `is_baseline_file` filter whose filename is an ABSOLUTE path. Committing
+      that puts one developer's home directory in the repo and guarantees a diff
+      for everyone else.
+    """
+    cleaned = path.replace("\\", "/")
+    root = str(ROOT).replace("\\", "/").rstrip("/") + "/"
+    return cleaned.removeprefix(root)
+
+
+def normalize_paths(text: str) -> str:
+    """Make a baseline byte-identical regardless of which machine produced it.
+
+    Covers both places a path appears: every finding under `results`, AND the
+    `filters_used` entries. An earlier version normalized only `results`, so the
+    absolute path in `filters_used` survived — the same class of
+    machine-dependence, in a different key.
     """
     data = json.loads(text)
+
     normalized: dict[str, list[dict[str, object]]] = {}
     for filename, findings in data.get("results", {}).items():
         for finding in findings:
             if isinstance(finding.get("filename"), str):
-                finding["filename"] = finding["filename"].replace("\\", "/")
-        normalized[filename.replace("\\", "/")] = findings
+                finding["filename"] = _portable(finding["filename"])
+        normalized[_portable(filename)] = findings
     data["results"] = normalized
+
+    for entry in data.get("filters_used", []):
+        if isinstance(entry, dict) and isinstance(entry.get("filename"), str):
+            entry["filename"] = _portable(entry["filename"])
+
     return json.dumps(data, indent=2) + "\n"
 
 

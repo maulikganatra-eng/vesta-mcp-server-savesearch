@@ -270,6 +270,51 @@ def test_normalize_paths_uses_forward_slashes_regardless_of_os() -> None:
     )
 
 
+def test_normalize_paths_also_covers_filters_used() -> None:
+    """`filters_used` carries a path too, and it is an ABSOLUTE one.
+
+    Scanned with `--baseline`, detect-secrets records an `is_baseline_file`
+    filter whose filename is the full path on the machine that ran it.
+    Committing that puts one developer's home directory into a shared file and
+    guarantees a diff for everyone else — the same machine-dependence the
+    separator fix addresses, in a different key.
+
+    This case is separated out because the original fix normalized only
+    `results`, and the test fixture for it had no `filters_used` at all — which
+    is precisely why the gap survived review.
+    """
+    import json
+
+    absolute = str(ROOT / ".secrets.baseline")
+    payload = json.dumps(
+        {
+            "results": {},
+            "filters_used": [
+                {"path": "detect_secrets.filters.common.is_baseline_file", "filename": absolute},
+                {"path": "detect_secrets.filters.heuristic.is_potential_uuid"},
+            ],
+        }
+    )
+    normalized = json.loads(secrets_baseline.normalize_paths(payload))
+
+    assert normalized["filters_used"][0]["filename"] == ".secrets.baseline"
+    # A filter with no filename must survive untouched, not gain a key.
+    assert "filename" not in normalized["filters_used"][1]
+
+
+def test_committed_baseline_holds_no_absolute_paths() -> None:
+    """The file in git must be machine-independent, not just normalizable.
+
+    Guards the actual artefact rather than only the function: the committed
+    baseline previously came from a different code path (bootstrap scans without
+    `--baseline`) than the documented re-scan command, so running
+    `tasks.py secrets-baseline` rewrote it with an absolute path.
+    """
+    text = (ROOT / ".secrets.baseline").read_text(encoding="utf-8")
+    for marker in ("/Users/", "/home/", ":\\", "C:/"):
+        assert marker not in text, f"committed baseline contains a machine path ({marker!r})"
+
+
 def test_every_task_command_is_frozen() -> None:
     """`uv run` without --frozen can silently re-lock.
 
