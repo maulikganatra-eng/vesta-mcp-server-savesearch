@@ -78,8 +78,10 @@ not exist, so they cannot drift or be forgotten.
 - **The coverage threshold** lives only in `[tool.coverage.report] fail_under`.
   Any `pytest --cov` picks it up. It is not repeated in CI args, the Makefile or a
   hook entry.
-- **The Python version** lives in `.python-version`, `requires-python`, and the CI
-  `PYTHON_VERSION` env var — which is set once and referenced by every job.
+- **The Python version** lives in `.python-version` and nowhere else. CI has no
+  `setup-python` step — `setup-uv` provisions the interpreter and uv reads
+  `.python-version` itself. (`requires-python` in `pyproject.toml` states a
+  *floor* for consumers, which is a different thing from the version we build with.)
 
 The reason to care: both older repos carry the comment *"keep in sync with the
 pinned ruff in ci.yml — bump both together"*. They are now a year apart, on 0.15.15

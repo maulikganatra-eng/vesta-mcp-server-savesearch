@@ -1,19 +1,26 @@
 # =========================================================================
 # CI — project-agnostic. Nothing in this file names this project, lists source
-# directories, or pins a tool version. Copy it into a new repo unchanged.
+# directories, pins a tool version, or states the Python version. Copy it into a
+# new repo unchanged.
 #
-# Four jobs:
-#   hooks   — runs every pre-commit hook (ruff, format, secrets, hygiene, uv-lock)
+# Four jobs, all independent so a red PR shows every problem at once:
+#   hooks   — every pre-commit hook (ruff, format, secrets, hygiene, lock, pins)
 #   types   — mypy, strict, blocking
 #   tests   — pytest + the coverage gate from pyproject.toml
-#   audit   — dependency CVEs, advisory, also on a weekly schedule
+#   audit   — dependency CVEs, advisory, plus a weekly scheduled run
 #
-# WHY `hooks` RUNS pre-commit INSTEAD OF INSTALLING RUFF DIRECTLY.
-# It makes .pre-commit-config.yaml the single source of truth for tool versions.
-# Our two older repos each pin ruff in both the workflow and the hook config with
-# a comment saying "bump both together"; they have since drifted to different
-# major versions, so local and CI results disagree. This removes the invariant
-# instead of documenting it.
+# THREE DELIBERATE CHOICES, each fixing something that went wrong in our older repos:
+#
+# 1. `hooks` runs pre-commit rather than installing ruff itself, so
+#    .pre-commit-config.yaml is the only place a tool version is written. The older
+#    repos pin ruff in both the workflow and the hook config with a comment saying
+#    "bump both together"; they have since drifted to 0.15.15 and 0.4.4.
+#
+# 2. No actions/setup-python step. uv provisions the interpreter and reads
+#    .python-version, so the Python version is stated in exactly one file.
+#
+# 3. No `needs:` chains. In the older repos `type-check` and the PR gate both wait
+#    on `lint`, so a formatting nit hides a real failure for a whole cycle.
 # =========================================================================
 
 name: CI
@@ -24,7 +31,7 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    - cron: "0 6 * * 1" # Mondays 06:00 UTC — picks up newly published CVEs
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — surfaces newly published CVEs
   workflow_dispatch:
 
 # Cancel superseded runs on the same ref so a rapid push sequence does not queue.
@@ -32,45 +39,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Least privilege. The default token is read/write on most events; none of these
-# jobs write anything, so drop it to read.
+# Least privilege. The default token is broader than any job here needs.
 permissions:
   contents: read
 
-env:
-  # Single place to bump the Python version for every job. Must match
-  # .python-version and requires-python in pyproject.toml.
-  PYTHON_VERSION: "3.11"
-
 jobs:
   # =======================================================================
-  # Lint, format, secrets, file hygiene, lock-file freshness — one job.
+  # Lint, format, secrets, file hygiene, lock freshness, version pins — one job.
   # =======================================================================
   hooks:
-    name: Hooks (ruff, format, secrets, lock)
+    name: Hooks (ruff, format, secrets, lock, pins)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
-          # detect-secrets compares against the baseline; a shallow clone is fine,
-          # but pre-commit's --from-ref usage on PRs benefits from full history.
+          # detect-secrets compares against the committed baseline; full history
+          # keeps its diff-based checks meaningful on pull requests.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v9
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
       - name: Cache pre-commit environments
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('.pre-commit-config.yaml') }}
-      - name: Install project (hooks need the venv for uv-lock)
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml', '.python-version') }}
+      - name: Install project
+        # uv reads .python-version and installs the interpreter if it is absent.
         run: uv sync --frozen
-      - name: Run all pre-commit hooks
-        # --hook-stage pre-commit so mypy and pytest are NOT run here; they get
-        # their own jobs below and would otherwise run twice per CI run.
+      - name: Run pre-commit hooks
+        # --hook-stage pre-commit so mypy and pytest do not also run here; they
+        # have their own jobs and would otherwise run twice per CI run.
         run: >
           uv run --frozen pre-commit run
           --all-files --show-diff-on-failure --color=always
@@ -83,13 +82,10 @@ jobs:
     name: Type check (mypy, strict)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
       - run: uv sync --frozen
       - name: mypy
         # Targets come from [tool.mypy] files in pyproject.toml, so this command
@@ -98,63 +94,73 @@ jobs:
 
   # =======================================================================
   # Tests + coverage gate.
-  #
-  # Deliberately NOT `needs: hooks`. Lint and tests are independent signals, and
-  # chaining them means a formatting nit hides a real test failure for a full
-  # cycle. Both run in parallel; a red PR shows you everything at once.
   # =======================================================================
   tests:
     name: Tests (pytest + coverage gate)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # One entry today. Add "3.12" here to test a second interpreter — no other
-        # part of this workflow needs to change.
-        python-version: ["3.11"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
         with:
           enable-cache: true
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - run: uv sync --frozen
       - name: pytest
         # The threshold is fail_under in [tool.coverage.report] — not repeated here.
         # `contract` and `e2e` need live credentials and are run by hand per the
-        # incremental build plan; excluding them keeps CI hermetic.
+        # build plan; excluding them by marker keeps CI hermetic.
         run: >
           uv run --frozen pytest --cov --cov-report=term-missing
           --cov-report=xml -m "not contract and not e2e"
-      - name: Upload coverage artefact
+      - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: coverage-${{ matrix.python-version }}
+          name: coverage
           path: coverage.xml
           if-no-files-found: ignore
+
+    # To test a second interpreter, add a matrix and pass it to uv — nothing else
+    # in this job changes:
+    #
+    #   strategy:
+    #     fail-fast: false
+    #     matrix:
+    #       python-version: ["3.11", "3.12"]
+    #   ...
+    #   - run: uv sync --frozen --python ${{ matrix.python-version }}
 
   # =======================================================================
   # Dependency CVEs — advisory on purpose.
   #
-  # A CVE published in a transitive dependency is not the fault of the PR that
+  # A CVE published in a transitive dependency is not the fault of whichever PR
   # happens to be open, and blocking on it stops unrelated work. The weekly
-  # scheduled run is what surfaces these; treat a failure as a task, not a gate.
+  # scheduled run is what surfaces these. Treat a failure as a task, not a gate.
   # =======================================================================
   audit:
     name: Dependency audit (advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
         with:
           enable-cache: true
       - name: pip-audit over the locked dependency set
-        # Auditing the lock file, not the loose ranges in pyproject.toml, is the
-        # point — it reports what would actually be installed.
+        # Auditing the lock file rather than the loose ranges in pyproject.toml is
+        # the point: it reports what would actually be installed.
+        #
+        # --no-emit-project omits the `-e .` line. Without it pip-audit tries to
+        # BUILD this project rather than audit anything, which fails for reasons
+        # that have nothing to do with security.
+        #
+        # Dev dependencies are included deliberately. They are most of what a
+        # service like this depends on, and a CVE in a test or lint tool still runs
+        # on developer machines and on CI runners.
+        #
+        # No --strict: it promotes warnings (such as a dependency with no known
+        # vulnerability data) to failures, which for an advisory job produces noise
+        # that trains people to ignore the result.
         run: |
-          uv export --frozen --no-dev --format requirements-txt > requirements.audit.txt
-          uvx pip-audit --requirement requirements.audit.txt --strict
+          uv export --frozen --no-emit-project --format requirements-txt \
+            > requirements.audit.txt
+          uvx --python 3.11 pip-audit --requirement requirements.audit.txt
