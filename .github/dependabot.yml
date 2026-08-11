@@ -1,8 +1,18 @@
-# Dependabot — keeps uv.lock and the GitHub Actions pins current.
+# Dependabot — keeps uv.lock, the GitHub Actions pins, and the pre-commit hook
+# revs current.
 #
 # Grouped into one PR per ecosystem per week. Ungrouped Dependabot on a repo with
 # a lock file produces a PR per package, which nobody reviews and which conflicts
 # with itself on every merge.
+#
+# The "pre-commit" ecosystem below bumps the `rev:` fields in
+# .pre-commit-config.yaml. Without it, a "uv" PR bumping ruff's pyproject.toml
+# pin would fail CI's `hooks` job the moment it merges — scripts/check_tool_pins.py
+# would (correctly) report the two sides disagree, and a human would have to
+# notice and fix it by hand. This does not close that gap on its own — the two
+# ecosystems still run as separate, uncoordinated PRs — but it means the
+# pre-commit side gets its own bump attempt on the same weekly cadence rather
+# than waiting indefinitely for someone to notice check_tool_pins.py's failure.
 
 version: 2
 updates:
@@ -34,3 +44,14 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "chore(ci)"
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      pre-commit-hooks:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(pre-commit)"

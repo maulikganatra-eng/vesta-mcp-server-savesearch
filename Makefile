@@ -12,7 +12,7 @@
 
 .DEFAULT_GOAL := help
 .PHONY: help setup lint format type-check test test-cov test-contract check \
-        hooks secrets-baseline lock outdated clean
+        hooks check-pins check-python-version secrets-baseline lock outdated clean
 
 ## setup: Fresh clone -> ready to work (venv, deps, git hooks, secrets baseline)
 # Must work BEFORE a venv exists, so it cannot go through `uv run`.
@@ -62,13 +62,23 @@ hooks:
 	uv run --frozen pre-commit run --all-files --hook-stage pre-commit
 	uv run --frozen pre-commit run --all-files --hook-stage pre-push
 
+## check-pins: Verify tool versions agree between pyproject.toml and pre-commit
+# Routed through `uv run` (project venv), not a bare `python3`/`python` — the
+# script imports pyyaml/packaging, which only exist in the project venv, and
+# `uv run` sidesteps the python3-vs-python naming problem entirely since uv
+# manages its own interpreter rather than relying on what happens to be on PATH.
+check-pins:
+	uv run --frozen python scripts/check_tool_pins.py
+
+## check-python-version: Verify .python-version agrees with ruff/mypy/Dockerfile
+check-python-version:
+	uv run --frozen python scripts/check_python_version.py
+
 ## secrets-baseline: Re-audit and rewrite .secrets.baseline after a false positive
-# --exclude-files must match the detect-secrets hook's `exclude:` in
-# .pre-commit-config.yaml — otherwise this re-audit adds entries for files
-# (uv.lock, notebooks) the hook itself never re-checks at commit time.
+# Delegates to scripts/secrets_baseline.py so the --exclude-files pattern is
+# defined in exactly one place, shared with scripts/bootstrap.py's initial scan.
 secrets-baseline:
-	uv run --frozen detect-secrets scan --baseline .secrets.baseline \
-		--exclude-files 'uv\.lock' --exclude-files '.*\.ipynb'
+	uv run --frozen python scripts/secrets_baseline.py .secrets.baseline
 	@echo "Review the diff before committing — never baseline a real secret."
 
 ## lock: Re-resolve uv.lock after editing dependencies in pyproject.toml
@@ -79,11 +89,16 @@ lock:
 outdated:
 	uv tree --outdated
 
-## clean: Remove caches and coverage artefacts
+## clean: Remove every gitignored file except .venv (caches, coverage artefacts)
+# Reads .gitignore via `git ls-files --ignored` instead of hand-duplicating its
+# list here — a cache dir added to .gitignore later but not here would silently
+# stop being cleaned, the exact class of drift this whole setup exists to avoid.
+# `git clean -e` does NOT mean "exclude from cleaning" (it means the opposite:
+# an extra pattern to also clean), so .venv is filtered out by hand instead.
 clean:
-	find . -type d -name __pycache__ -not -path './.venv/*' -exec rm -rf {} + 2>/dev/null || true
-	rm -rf htmlcov .coverage coverage.xml requirements.audit.txt \
-	       .pytest_cache .ruff_cache .mypy_cache
+	git ls-files --others --ignored --exclude-standard --directory -z \
+		| grep -zv '^\.venv/$$' \
+		| xargs -0 rm -rf --
 
 ## help: Show this message
 help:

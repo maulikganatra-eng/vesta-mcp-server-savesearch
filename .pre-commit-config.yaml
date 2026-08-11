@@ -110,21 +110,36 @@ repos:
         # and the error points at the wrong person.
 
   # -----------------------------------------------------------------------
-  # Tool pins must agree between pyproject.toml and this file.
+  # Tool pins must agree between pyproject.toml and this file, and the Python
+  # version must agree across .python-version / ruff / mypy / the Dockerfile.
   #
   # ruff runs from two places on purpose: `make lint` uses the project venv, the
   # git hook uses pre-commit's isolated copy. Both are wanted; different VERSIONS
   # are not, because then the same code passes locally and fails in CI. Our two
   # older repos both carry a "bump both together" comment and have drifted a year
   # apart, so this is enforced rather than requested.
+  #
+  # Both entries below go through `make`, not a bare `python3 ...`. Two reasons:
+  # the scripts import pyyaml/packaging, which live only in the project venv, not
+  # whatever bare interpreter happens to be on PATH; and `uv run` (which the
+  # Makefile targets use) sidesteps the python3-vs-python naming problem
+  # entirely, rather than needing its own Windows fallback the way `make setup`
+  # does — uv manages its own interpreter instead of relying on PATH naming.
   # -----------------------------------------------------------------------
   - repo: local
     hooks:
       - id: check-tool-pins
         name: tool pins agree (pyproject vs pre-commit)
-        entry: python3 scripts/check_tool_pins.py
+        entry: make check-pins
         language: system
         files: ^(pyproject\.toml|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+
+      - id: check-python-version
+        name: Python version agrees (pyproject vs .python-version vs Dockerfile)
+        entry: make check-python-version
+        language: system
+        files: ^(pyproject\.toml|\.python-version|Dockerfile)$
         pass_filenames: false
 
   # =======================================================================

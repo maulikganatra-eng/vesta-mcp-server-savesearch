@@ -18,10 +18,13 @@ file. A new team member hits that on day one.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+import secrets_baseline
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / ".secrets.baseline"
@@ -34,101 +37,111 @@ def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess
     return subprocess.run(cmd, cwd=ROOT, text=True, check=False, capture_output=capture)
 
 
-def step(n: int, total: int, title: str) -> None:
-    print(f"\n{DIM}[{n}/{total}]{RESET} {title}")
-
-
-def main() -> int:
-    total = 5
-    failures: list[str] = []
-
-    print("Bootstrapping", ROOT.name)
-
-    # -- 1. uv present? Everything else depends on it. ----------------------
-    step(1, total, "Checking for uv")
+def _step_uv_present() -> bool:
     if shutil.which("uv") is None:
         print(f"  {FAIL} uv is not on PATH.")
         print("     Install it:  curl -LsSf https://astral.sh/uv/install.sh | sh")
         print("     Then re-run this script.")
-        return 1
+        return False
     version = run(["uv", "--version"], capture=True).stdout.strip()
     print(f"  {OK} {version}")
+    return True
 
-    # -- 2. Dependencies ---------------------------------------------------
-    step(2, total, "Installing dependencies (uv sync)")
+
+def _step_dependencies() -> bool:
     if run(["uv", "sync"]).returncode != 0:
         print(f"  {FAIL} uv sync failed — fix the error above, then re-run.")
-        return 1
+        return False
     print(f"  {OK} .venv is in sync with uv.lock")
+    return True
 
-    # -- 3. Secrets baseline. Do this BEFORE installing hooks, so the first
-    #       commit after bootstrap cannot fail on a missing baseline. --------
-    step(3, total, "Secrets baseline")
+
+def _step_secrets_baseline() -> bool:
     if BASELINE.exists():
         print(f"  {OK} .secrets.baseline already present")
-    else:
-        # --exclude-files must match the detect-secrets hook's `exclude:` in
-        # .pre-commit-config.yaml. Without it, this first full-tree scan picks
-        # up hundreds of hash-like strings in uv.lock that the hook will never
-        # re-check, bloating the baseline with entries a new contributor has
-        # to manually triage on day one.
-        proc = run(
-            [
-                "uv",
-                "run",
-                "detect-secrets",
-                "scan",
-                "--exclude-files",
-                r"uv\.lock",
-                "--exclude-files",
-                r".*\.ipynb",
-            ],
-            capture=True,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            BASELINE.write_text(proc.stdout)
-            print(f"  {OK} created .secrets.baseline")
-            print(
-                f"     {DIM}Commit it. Re-run `make secrets-baseline` after an audited"
-                f" false positive.{RESET}"
-            )
-        else:
-            print(f"  {WARN} could not generate a baseline (detect-secrets not installed yet?)")
-            print("     Run `make secrets-baseline` once dependencies are installed.")
-            failures.append("secrets baseline")
+        return True
 
-    # -- 4. Git hooks — both types. ---------------------------------------
-    step(4, total, "Installing git hooks (pre-commit and pre-push)")
+    proc = run(secrets_baseline.build_scan_command(), capture=True)
+    if proc.returncode == 0 and proc.stdout.strip():
+        BASELINE.write_text(proc.stdout)
+        print(f"  {OK} created .secrets.baseline")
+        print(
+            f"     {DIM}Commit it. Re-run `make secrets-baseline` after an audited"
+            f" false positive.{RESET}"
+        )
+        return True
+
+    print(f"  {WARN} could not generate a baseline (detect-secrets not installed yet?)")
+    print("     Run `make secrets-baseline` once dependencies are installed.")
+    return False
+
+
+def _step_git_hooks() -> bool:
     # default_install_hook_types in .pre-commit-config.yaml means one command
     # installs both. --install-hooks pre-builds the environments so the first
     # real commit is not a two-minute wait.
     if run(["uv", "run", "pre-commit", "install", "--install-hooks"]).returncode != 0:
         print(f"  {FAIL} pre-commit install failed")
-        failures.append("git hooks")
-    else:
-        hooks = ROOT / ".git" / "hooks"
-        installed = [n for n in ("pre-commit", "pre-push") if (hooks / n).exists()]
-        print(f"  {OK} installed: {', '.join(installed) or 'none found'}")
-        if "pre-push" not in installed:
-            print(f"  {WARN} pre-push hook missing — tests will not run before push.")
-            print("     Check default_install_hook_types in .pre-commit-config.yaml")
-            failures.append("pre-push hook")
+        return False
 
-    # -- 5. Prove it works, rather than assuming. -------------------------
-    step(5, total, "Verifying the toolchain runs")
+    hooks = ROOT / ".git" / "hooks"
+    installed = [n for n in ("pre-commit", "pre-push") if (hooks / n).exists()]
+    print(f"  {OK} installed: {', '.join(installed) or 'none found'}")
+    if "pre-push" not in installed:
+        print(f"  {WARN} pre-push hook missing — tests will not run before push.")
+        print("     Check default_install_hook_types in .pre-commit-config.yaml")
+        return False
+    return True
+
+
+def _step_toolchain_runs() -> bool:
+    ok = True
     for label, cmd in (
         ("ruff", ["uv", "run", "ruff", "--version"]),
         ("mypy", ["uv", "run", "mypy", "--version"]),
         ("pytest", ["uv", "run", "pytest", "--version"]),
     ):
         proc = run(cmd, capture=True)
-        if proc.returncode == 0:
-            print(f"  {OK} {label}: {proc.stdout.strip().splitlines()[0]}")
-        else:
+        if proc.returncode != 0:
             print(f"  {FAIL} {label} would not run")
-            failures.append(label)
+            ok = False
+            continue
+        # A tool can exit 0 with its version banner on stderr rather than
+        # stdout (or with no output at all), so .stdout.splitlines()[0] alone
+        # can IndexError here. Fall back rather than crash the whole script
+        # over a cosmetic status line.
+        text = (proc.stdout or proc.stderr).strip()
+        line = text.splitlines()[0] if text else "(no version output)"
+        print(f"  {OK} {label}: {line}")
+    return ok
 
-    # -- Report -----------------------------------------------------------
+
+# (title, function) — total step count is len(STEPS), never a hand-maintained
+# number that a future added/removed step can silently make wrong.
+STEPS: list[tuple[str, Callable[[], bool]]] = [
+    ("Checking for uv", _step_uv_present),
+    ("Installing dependencies (uv sync)", _step_dependencies),
+    ("Secrets baseline", _step_secrets_baseline),
+    ("Installing git hooks (pre-commit and pre-push)", _step_git_hooks),
+    ("Verifying the toolchain runs", _step_toolchain_runs),
+]
+
+
+def main() -> int:
+    total = len(STEPS)
+    print("Bootstrapping", ROOT.name)
+
+    failures: list[str] = []
+    for i, (title, step_fn) in enumerate(STEPS, start=1):
+        print(f"\n{DIM}[{i}/{total}]{RESET} {title}")
+        if not step_fn():
+            failures.append(title)
+            if i <= 2:
+                # uv missing or `uv sync` failing means nothing downstream can
+                # possibly work — stop immediately rather than print four more
+                # confusing failures caused by the same root cause.
+                return 1
+
     print()
     if failures:
         print(f"{WARN} Done, with problems: {', '.join(failures)}")

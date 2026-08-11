@@ -50,6 +50,14 @@ dev = [
     # a false positive, so `uv sync`'s baseline generation and the hook's
     # re-check could disagree — enforced by scripts/check_tool_pins.py.
     "detect-secrets==1.5.0",
+    # Used directly by scripts/check_tool_pins.py (real YAML parsing instead of
+    # hand-rolled line matching) and scripts/check_python_version.py. No pin
+    # needed — these are parsing libraries, not something whose *version* this
+    # repo's correctness depends on the way ruff's or detect-secrets' does.
+    "pyyaml>=6.0",
+    "types-pyyaml>=6.0",
+    # packaging ships its own inline types (py.typed); no stub package needed.
+    "packaging>=24.0",
 ]
 
 [build-system]

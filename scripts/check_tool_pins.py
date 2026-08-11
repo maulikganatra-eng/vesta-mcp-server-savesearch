@@ -13,16 +13,25 @@ Some tools legitimately run from two places:
 Both are wanted. What is not wanted is them being different versions, because then
 the same code passes locally and fails in CI, and the error blames the wrong commit.
 
-Uses only the standard library so it can run as a pre-commit hook with no
-environment of its own. Add a tool here by adding one row to TOOLS.
+Uses `pyyaml` (real YAML, not line-by-line string matching — a hand-rolled parser
+silently mis-handled inline comments, flow-style mappings, and anything else it
+didn't anticipate) and `packaging` (real PEP 508 requirement parsing, so an exact
+pin with extras or an environment marker, e.g. `ruff[extra]==0.15.15; python_version
+>= "3.11"`, is recognised rather than silently dropped). Both are direct dev
+dependencies for exactly this reason — this script must run inside the project venv
+(`uv run python scripts/check_tool_pins.py`), not a bare system Python.
+
+Add a tool here by adding one row to TOOLS.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import re
 import sys
 import tomllib
+
+from packaging.requirements import InvalidRequirement, Requirement
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
@@ -42,38 +51,40 @@ def pyproject_pins() -> dict[str, str]:
     pins: dict[str, str] = {}
     for spec in dev:
         # PEP 735 allows dict entries too (e.g. {"include-group": "..."}), not
-        # only plain "name==version" strings. Skip anything that isn't a string
+        # only plain requirement strings. Skip anything that isn't a string
         # rather than crashing — this script runs as a commit-time hook on any
         # pyproject.toml change, so an unrelated dependency-group edit must not
         # be able to block an unrelated commit.
         if not isinstance(spec, str):
             continue
-        m = re.fullmatch(r"([A-Za-z0-9._-]+)==([0-9][^\s;]*)", spec.strip())
-        if m:
-            pins[m.group(1).lower()] = m.group(2)
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            continue
+        # Only an exact, single-specifier pin counts — "ruff==0.15.15" yes,
+        # "ruff>=1.0" or "ruff==0.15.15,<0.16" no. A real parser (rather than a
+        # regex) means extras (`ruff[extra]==...`) and environment markers
+        # (`; python_version >= "3.11"`) are handled structurally: they simply
+        # do not affect which specifier we read, instead of silently defeating
+        # a hand-written pattern that never anticipated them.
+        specs = list(req.specifier)
+        if len(specs) == 1 and specs[0].operator == "==":
+            pins[req.name.lower()] = specs[0].version
     return pins
 
 
 def precommit_revs() -> dict[str, str]:
-    """Map repo URL -> rev, without needing a YAML parser."""
+    """Map repo URL -> rev, from the real parsed YAML structure."""
+    doc = yaml.safe_load(PRECOMMIT.read_text()) or {}
     revs: dict[str, str] = {}
-    current: str | None = None
-    for raw in PRECOMMIT.read_text().splitlines():
-        line = raw.strip()
-        if line.startswith("- repo:"):
-            repo = line.split(":", 1)[1].strip()
-            # A "local" repo never publishes a `rev:` of its own. Treat it as
-            # "nothing to track" immediately rather than leaving `current` set
-            # to "local" until the next "- repo:" line resets it — otherwise a
-            # `rev:`-shaped string appearing anywhere inside that local block
-            # (an entry, an arg, a comment) would be silently attributed to
-            # "local" instead of the real repo it belongs to, or to nothing.
-            current = None if repo == "local" else repo
-        elif line.startswith("rev:") and current:
-            # Strip a leading "v" and any inline comment: `rev: v0.15.15  # note`
-            rev = line.split(":", 1)[1].strip().split("#")[0].strip().strip("'\"")
-            revs[current] = rev.removeprefix("v")
-            current = None
+    for entry in doc.get("repos", []):
+        repo = entry.get("repo")
+        rev = entry.get("rev")
+        # A "local" repo never publishes a rev of its own — pre-commit doesn't
+        # require or use one. Skip it outright rather than recording it, so
+        # nothing can ever be misattributed to "local".
+        if repo and repo != "local" and rev is not None:
+            revs[repo] = str(rev).removeprefix("v")
     return revs
 
 

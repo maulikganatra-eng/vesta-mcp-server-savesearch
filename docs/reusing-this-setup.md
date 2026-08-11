@@ -17,9 +17,12 @@ project-agnostic except three values in `pyproject.toml`.
 .editorconfig
 .python-version
 .dockerignore
+Dockerfile
 Makefile
 scripts/bootstrap.py
 scripts/check_tool_pins.py
+scripts/check_python_version.py
+scripts/secrets_baseline.py
 ```
 
 None of them name this project, list source directories, pin a threshold, or
@@ -78,10 +81,17 @@ not exist, so they cannot drift or be forgotten.
 - **The coverage threshold** lives only in `[tool.coverage.report] fail_under`.
   Any `pytest --cov` picks it up. It is not repeated in CI args, the Makefile or a
   hook entry.
-- **The Python version** lives in `.python-version` and nowhere else. CI has no
-  `setup-python` step — `setup-uv` provisions the interpreter and uv reads
-  `.python-version` itself. (`requires-python` in `pyproject.toml` states a
-  *floor* for consumers, which is a different thing from the version we build with.)
+- **The Python version is canonical in `.python-version`**, which is what CI
+  actually uses — there is no `setup-python` step; `setup-uv` provisions the
+  interpreter and reads `.python-version` itself. But three other places
+  *encode* the same version and cannot read it dynamically: ruff's
+  `target-version`, mypy's `python_version`, and the Dockerfile's two `FROM`
+  lines. (`requires-python` in `pyproject.toml` is deliberately a *floor* for
+  consumers, not the build version, and is checked separately.)
+  `scripts/check_python_version.py` is the mechanism, not "nowhere else" —
+  it asserts all four agree with `.python-version` on every commit that
+  touches any of them, the same way `check_tool_pins.py` does for tool
+  versions rather than eliminating the duplication outright.
 
 The reason to care: both older repos carry the comment *"keep in sync with the
 pinned ruff in ci.yml — bump both together"*. They are now a year apart, on 0.15.15
