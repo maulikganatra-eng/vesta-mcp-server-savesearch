@@ -15,11 +15,13 @@ project-agnostic except three values in `pyproject.toml`.
 .github/dependabot.yml
 .github/pull_request_template.md
 .editorconfig
+.gitattributes
 .python-version
 .dockerignore
 Dockerfile
 Makefile
 scripts/bootstrap.py
+scripts/tasks.py
 scripts/check_tool_pins.py
 scripts/check_python_version.py
 scripts/secrets_baseline.py
@@ -50,7 +52,7 @@ Done. Commit the generated `.secrets.baseline` and `uv.lock`.
 
 ## Why it is copyable at all
 
-Three decisions do the work. Each one exists because of a specific problem in our
+Four decisions do the work. Each one exists because of a specific problem in our
 older repos.
 
 ### The `src/` layout means no path lists anywhere
@@ -74,10 +76,11 @@ not exist, so they cannot drift or be forgotten.
 - **Tool versions** live in `.pre-commit-config.yaml`. CI runs
   `pre-commit run --all-files` rather than installing ruff itself, so the workflow
   contains no version at all.
-- **The one tool that must appear twice** is ruff, because `make lint` uses the
-  project venv while the git hook uses pre-commit's isolated copy. That invariant
-  is enforced by `scripts/check_tool_pins.py`, which runs on every commit that
-  touches either file.
+- **The one tool that must appear twice** is ruff, because `scripts/tasks.py lint`
+  (what `make lint` calls) uses the project venv while the git hook uses
+  pre-commit's isolated copy. That invariant is enforced by
+  `scripts/check_tool_pins.py`, which runs on every commit that touches either
+  file.
 - **The coverage threshold** lives only in `[tool.coverage.report] fail_under`.
   Any `pytest --cov` picks it up. It is not repeated in CI args, the Makefile or a
   hook entry.
@@ -96,6 +99,26 @@ not exist, so they cannot drift or be forgotten.
 The reason to care: both older repos carry the comment *"keep in sync with the
 pinned ruff in ci.yml — bump both together"*. They are now a year apart, on 0.15.15
 and 0.4.4, with different default rules. A comment is not a mechanism.
+
+### Nothing automatic depends on `make`
+
+`scripts/tasks.py` is the actual single source of truth for every command this
+repo runs — `uv run --frozen python scripts/tasks.py <task>`. The Makefile is a
+thin, optional wrapper around it, for people who like typing `make <target>`.
+
+This split exists because of a mistake made and then caught in this same repo.
+An earlier draft made the Makefile itself the source of truth, and had
+`.pre-commit-config.yaml` and `ci.yml` call `make <target>` directly — genuinely
+fixing the version-drift problem above, but introducing a new one: **GNU Make is
+not on a stock Windows machine's PATH** (Python + Git for Windows only, no
+WSL/MinGW/choco make), confirmed empirically. Every commit and every push broke
+on a Windows machine that had done nothing wrong.
+
+Moving the one-source-of-truth job to a plain Python script fixes both at once:
+one place still defines each command, and that place runs anywhere `uv` runs —
+which is everywhere, since `uv` is already required for the rest of this setup.
+`uv run` also has no `python3`-vs-`python` naming ambiguity to work around,
+unlike a bare interpreter invocation would.
 
 ### Fast commits, slower pushes
 

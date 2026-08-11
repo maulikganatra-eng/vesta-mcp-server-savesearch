@@ -28,6 +28,15 @@ If uv is missing:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+**`make` itself is optional.** Nothing in this repo's git hooks or CI depends on
+it — GNU Make is not on a stock Windows machine's PATH, so every `make <target>`
+below has an exact equivalent with no `make` involved:
+
+```bash
+python scripts/bootstrap.py                        # same as `make setup`
+uv run --frozen python scripts/tasks.py <task>      # same as `make <task>`
+```
+
 ## Daily commands
 
 ```bash

@@ -1,10 +1,19 @@
 # =========================================================================
-# Makefile — project-agnostic. No source path list, no module list, no coverage
-# threshold. Every target delegates to a tool that reads pyproject.toml.
+# Makefile — a thin, OPTIONAL convenience wrapper. Every target below just
+# calls `uv run --frozen python scripts/tasks.py <name>`, which is the actual
+# single source of truth for each command.
 #
-# This is the difference from our older repos, where SOURCES and COV_MODULES are
-# spelled out here AND in ci.yml AND in .pre-commit-config.yaml. Adding a
-# directory there means editing three files; here it means editing none.
+# Why the indirection: .pre-commit-config.yaml and ci.yml call scripts/tasks.py
+# directly, with no `make` involved at all. GNU Make is not on a stock Windows
+# machine's PATH (Python + Git for Windows only, no WSL/MinGW/choco make) —
+# confirmed empirically, and it broke every commit and push the moment those
+# hooks were changed to run `make <target>` instead of the command itself.
+# Moving the one-source-of-truth job from this Makefile to scripts/tasks.py
+# (plain Python, runs anywhere `uv` runs) keeps that property without
+# requiring `make` anywhere on the automatic (hook/CI) path.
+#
+# If you don't have `make`, run the exact same commands directly:
+#   uv run --frozen python scripts/tasks.py <task>
 #
 #   make            # same as `make help`
 #   make setup      # one command, fresh clone to ready
@@ -15,7 +24,7 @@
         hooks check-pins check-python-version secrets-baseline lock outdated clean
 
 ## setup: Fresh clone -> ready to work (venv, deps, git hooks, secrets baseline)
-# Must work BEFORE a venv exists, so it cannot go through `uv run`.
+# The one target that must work BEFORE a venv (and so `uv run`) exists.
 # bootstrap.py uses only the stdlib. Tries python3 first (macOS/Linux, and
 # Windows via WSL or the py-launcher's python3 alias), falls back to python
 # (the name the official Windows installer actually puts on PATH).
@@ -24,81 +33,61 @@ setup:
 
 ## lint: ruff check, no auto-fix (what CI runs)
 lint:
-	uv run --frozen ruff check --no-fix .
-	uv run --frozen ruff format --check .
+	uv run --frozen python scripts/tasks.py lint
 
 ## format: Auto-fix lint violations and format
 format:
-	uv run --frozen ruff check --fix .
-	uv run --frozen ruff format .
+	uv run --frozen python scripts/tasks.py format
 
 ## type-check: mypy, strict
 type-check:
-	uv run --frozen mypy
+	uv run --frozen python scripts/tasks.py type-check
 
 ## test: Fast suite — excludes tests needing live credentials
 test:
-	uv run --frozen pytest -m "not contract and not e2e"
+	uv run --frozen python scripts/tasks.py test
 
 ## test-cov: Fast suite with the coverage gate, terminal/HTML/XML reports
-# XML is for CI's artifact upload; HTML is for local browsing. One target for
-# both so the pre-commit pytest hook, this target and CI's `tests` job all run
-# literally the same command — see the note on the pytest hook in
-# .pre-commit-config.yaml.
 test-cov:
-	uv run --frozen pytest --cov --cov-report=term-missing --cov-report=html \
-		--cov-report=xml -m "not contract and not e2e"
+	uv run --frozen python scripts/tasks.py test-cov
 	@echo "HTML report: htmlcov/index.html"
 
 ## test-contract: Live-service tests. Needs real credentials. Never runs in CI.
 test-contract:
-	uv run --frozen pytest -m contract -v
+	uv run --frozen python scripts/tasks.py test-contract
 
 ## check: Everything CI runs, in CI's order. Run before opening a PR.
-check: lint type-check test-cov
+check:
+	uv run --frozen python scripts/tasks.py check
 
 ## hooks: Run every pre-commit hook over the whole tree, including pre-push ones
 hooks:
-	uv run --frozen pre-commit run --all-files --hook-stage pre-commit
-	uv run --frozen pre-commit run --all-files --hook-stage pre-push
+	uv run --frozen python scripts/tasks.py hooks
 
 ## check-pins: Verify tool versions agree between pyproject.toml and pre-commit
-# Routed through `uv run` (project venv), not a bare `python3`/`python` — the
-# script imports pyyaml/packaging, which only exist in the project venv, and
-# `uv run` sidesteps the python3-vs-python naming problem entirely since uv
-# manages its own interpreter rather than relying on what happens to be on PATH.
 check-pins:
-	uv run --frozen python scripts/check_tool_pins.py
+	uv run --frozen python scripts/tasks.py check-pins
 
 ## check-python-version: Verify .python-version agrees with ruff/mypy/Dockerfile
 check-python-version:
-	uv run --frozen python scripts/check_python_version.py
+	uv run --frozen python scripts/tasks.py check-python-version
 
 ## secrets-baseline: Re-audit and rewrite .secrets.baseline after a false positive
-# Delegates to scripts/secrets_baseline.py so the --exclude-files pattern is
-# defined in exactly one place, shared with scripts/bootstrap.py's initial scan.
 secrets-baseline:
-	uv run --frozen python scripts/secrets_baseline.py .secrets.baseline
+	uv run --frozen python scripts/tasks.py secrets-baseline
 	@echo "Review the diff before committing — never baseline a real secret."
 
 ## lock: Re-resolve uv.lock after editing dependencies in pyproject.toml
 lock:
-	uv lock
+	uv run --frozen python scripts/tasks.py lock
 
 ## outdated: Show dependencies with newer releases available
 outdated:
-	uv tree --outdated
+	uv run --frozen python scripts/tasks.py outdated
 
 ## clean: Remove every gitignored file except .venv (caches, coverage artefacts)
-# Reads .gitignore via `git ls-files --ignored` instead of hand-duplicating its
-# list here — a cache dir added to .gitignore later but not here would silently
-# stop being cleaned, the exact class of drift this whole setup exists to avoid.
-# `git clean -e` does NOT mean "exclude from cleaning" (it means the opposite:
-# an extra pattern to also clean), so .venv is filtered out by hand instead.
 clean:
-	git ls-files --others --ignored --exclude-standard --directory -z \
-		| grep -zv '^\.venv/$$' \
-		| xargs -0 rm -rf --
+	uv run --frozen python scripts/tasks.py clean
 
 ## help: Show this message
 help:

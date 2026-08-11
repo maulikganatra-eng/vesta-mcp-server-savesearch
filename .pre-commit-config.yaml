@@ -119,25 +119,30 @@ repos:
   # older repos both carry a "bump both together" comment and have drifted a year
   # apart, so this is enforced rather than requested.
   #
-  # Both entries below go through `make`, not a bare `python3 ...`. Two reasons:
-  # the scripts import pyyaml/packaging, which live only in the project venv, not
-  # whatever bare interpreter happens to be on PATH; and `uv run` (which the
-  # Makefile targets use) sidesteps the python3-vs-python naming problem
-  # entirely, rather than needing its own Windows fallback the way `make setup`
-  # does — uv manages its own interpreter instead of relying on PATH naming.
+  # Both entries below call `uv run --frozen python scripts/tasks.py <task>`
+  # directly — never `make`. GNU Make is not on a stock Windows machine's PATH
+  # (Python + Git for Windows only, no WSL/MinGW/choco make) — confirmed
+  # empirically, and it broke every commit the moment these hooks were changed
+  # to run `make <target>` instead of the command itself. `uv run` has no such
+  # problem: it is one binary with one name on every platform, and it resolves
+  # its own interpreter rather than relying on whatever happens to be on PATH
+  # under whatever name (`python3` vs `python`, a separate Windows trap `make
+  # setup` handles on its own). scripts/tasks.py is now the actual single
+  # source of truth for every command; the Makefile is an optional wrapper
+  # around it, used by neither this file nor ci.yml.
   # -----------------------------------------------------------------------
   - repo: local
     hooks:
       - id: check-tool-pins
         name: tool pins agree (pyproject vs pre-commit)
-        entry: make check-pins
+        entry: uv run --frozen python scripts/tasks.py check-pins
         language: system
         files: ^(pyproject\.toml|\.pre-commit-config\.yaml)$
         pass_filenames: false
 
       - id: check-python-version
         name: Python version agrees (pyproject vs .python-version vs Dockerfile)
-        entry: make check-python-version
+        entry: uv run --frozen python scripts/tasks.py check-python-version
         language: system
         files: ^(pyproject\.toml|\.python-version|Dockerfile)$
         pass_filenames: false
@@ -153,16 +158,15 @@ repos:
       # very often caused by an edit in file B, so per-file checking reports
       # the error in the wrong place or not at all.
       #
-      # Delegates to `make type-check` rather than spelling out the command
-      # here. The exact invocation used to be duplicated verbatim across this
-      # file, the Makefile and ci.yml — the same "three places to edit, easy to
-      # miss one" problem the tool-pin check exists to catch for versions, just
-      # for command strings instead. The Makefile is now the one place that
-      # knows the command; this hook and CI's `types` job both call it.
+      # Calls scripts/tasks.py rather than spelling out the command here or
+      # going through `make` — see the note above the check-tool-pins hook for
+      # why `make` is never used on this path. tasks.py is the one place that
+      # knows the actual mypy invocation; this hook and CI's `types` job both
+      # call it, so they cannot drift from each other.
       # ---------------------------------------------------------------
       - id: mypy
         name: mypy (strict, whole tree)
-        entry: make type-check
+        entry: uv run --frozen python scripts/tasks.py type-check
         language: system
         types_or: [python, pyi]
         pass_filenames: false
@@ -172,11 +176,11 @@ repos:
       # pytest — full suite plus the coverage gate from pyproject.toml.
       # `-m "not contract and not e2e"` keeps credential-hungry tests out of the
       # local hook; those are run deliberately, per the incremental build plan.
-      # Delegates to `make test-cov` for the same reason as the mypy hook above.
+      # Same reasoning as the mypy hook above.
       # ---------------------------------------------------------------
       - id: pytest
         name: pytest + coverage gate
-        entry: make test-cov
+        entry: uv run --frozen python scripts/tasks.py test-cov
         language: system
         types_or: [python, pyi]
         pass_filenames: false

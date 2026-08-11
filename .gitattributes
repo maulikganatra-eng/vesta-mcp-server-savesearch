@@ -1,0 +1,17 @@
+# Force LF everywhere, regardless of a contributor's local Git config.
+#
+# Without this, a Windows machine with the common `core.autocrlf=true` default
+# checks out every tracked file as CRLF. The mixed-line-ending pre-commit hook
+# (--fix=lf) then rewrites nearly the whole tree the moment `make setup` /
+# the first commit runs `pre-commit run --all-files` — a surprise mass-diff
+# on day one that has nothing to do with whatever the contributor actually
+# changed.
+* text=auto eol=lf
+
+# Binary files: never touch line endings, and don't diff them as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary

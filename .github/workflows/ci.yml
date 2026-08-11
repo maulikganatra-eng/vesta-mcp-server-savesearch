@@ -22,11 +22,15 @@
 # 3. No `needs:` chains. In the older repos `type-check` and the PR gate both wait
 #    on `lint`, so a formatting nit hides a real failure for a whole cycle.
 #
-# 4. `types` and `tests` call `make type-check` / `make test-cov` rather than
-#    spelling out the mypy/pytest invocation here. That exact command used to be
-#    duplicated verbatim across this file, .pre-commit-config.yaml and the
-#    Makefile — the same "three places to edit, one gets missed" problem the
-#    tool-pin check (scripts/check_tool_pins.py) exists to catch for versions.
+# 4. `types` and `tests` call `scripts/tasks.py` rather than spelling out the
+#    mypy/pytest invocation here. That exact command used to be duplicated
+#    verbatim across this file, .pre-commit-config.yaml and the Makefile — the
+#    same "three places to edit, one gets missed" problem the tool-pin check
+#    (scripts/check_tool_pins.py) exists to catch for versions. Deliberately
+#    NOT `make type-check`: GNU Make is not on a stock Windows machine's PATH,
+#    confirmed empirically, so nothing on this repo's automatic path (a git
+#    hook or a CI job) may depend on `make` existing. `uv run` has no such
+#    problem — it is one binary with one name on every platform.
 # =========================================================================
 
 name: CI
@@ -70,6 +74,11 @@ jobs:
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml', '.python-version') }}
+          # Falls back to the most recent cache for this OS on any miss (e.g. a
+          # routine Dependabot rev bump), so only the hooks whose rev actually
+          # changed rebuild their venv — not every hook's environment from scratch.
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
       - name: Install project
         # uv reads .python-version and installs the interpreter if it is absent.
         run: uv sync --frozen
@@ -94,11 +103,11 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - name: mypy
-        # Delegates to `make type-check` rather than repeating the command here
-        # — see the note on the mypy hook in .pre-commit-config.yaml. The
-        # Makefile's [tool.mypy] files list in pyproject.toml still means this
-        # never needs editing when a directory is added.
-        run: make type-check
+        # Calls scripts/tasks.py directly, not `make` — see the note on the
+        # mypy hook in .pre-commit-config.yaml. [tool.mypy] files in
+        # pyproject.toml still means this never needs editing when a
+        # directory is added.
+        run: uv run --frozen python scripts/tasks.py type-check
 
   # =======================================================================
   # Tests + coverage gate.
@@ -113,12 +122,12 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - name: pytest
-        # Delegates to `make test-cov` — same reasoning as the mypy step above.
-        # The threshold is fail_under in [tool.coverage.report], not repeated
-        # here or in the Makefile. `contract` and `e2e` need live credentials
-        # and are run by hand per the build plan; the Makefile target excludes
-        # them by marker, keeping CI hermetic.
-        run: make test-cov
+        # Calls scripts/tasks.py directly — same reasoning as the mypy step
+        # above. The threshold is fail_under in [tool.coverage.report], not
+        # repeated here. `contract` and `e2e` need live credentials and are
+        # run by hand per the build plan; the task excludes them by marker,
+        # keeping CI hermetic.
+        run: uv run --frozen python scripts/tasks.py test-cov
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v7
