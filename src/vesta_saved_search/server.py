@@ -27,6 +27,10 @@ from typing import TYPE_CHECKING, Literal, cast
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
+from vesta_saved_search.client import SavedSearchClient
+from vesta_saved_search.config import GUESTSITE_SAVED_SEARCH_BASE_URL
+from vesta_saved_search.tools import register_tools
+
 if TYPE_CHECKING:  # pragma: no cover - import-time only, for type checking
     from starlette.requests import Request
 
@@ -52,8 +56,9 @@ DEFAULT_TRANSPORT = "streamable-http"
 _Transport = Literal["stdio", "sse", "streamable-http"]
 
 
-def create_app() -> FastMCP:
-    """Build a fresh :class:`FastMCP` app with the ``/health`` route registered.
+def create_app(*, saved_search_client: SavedSearchClient | None = None) -> FastMCP:
+    """Build a fresh :class:`FastMCP` app with the ``/health`` route and every tool
+    this server exposes registered.
 
     A factory rather than a module-level singleton, because the tests need their own
     instance to register a throwaway tool on. That matters more than it looks: N1's
@@ -61,11 +66,19 @@ def create_app() -> FastMCP:
     protocol**, and the only honest way to test that is a real MCP client talking to a
     real app with a tool on it. A production singleton would force that test tool to
     ship in the wheel.
+
+    ``saved_search_client`` is accepted so a test can pass one built on
+    ``httpx.MockTransport`` instead of a real client that would try to reach the
+    live GuestSite API. Production code never passes it — the default builds a real
+    client against :data:`vesta_saved_search.config.GUESTSITE_SAVED_SEARCH_BASE_URL`.
     """
     host = os.getenv("MCP_HOST", DEFAULT_HOST)
     port = _port_from_env()
 
     app = FastMCP(SERVER_NAME, host=host, port=port)
+
+    client = saved_search_client or SavedSearchClient(GUESTSITE_SAVED_SEARCH_BASE_URL)
+    register_tools(app, client)
 
     # `type: ignore[untyped-decorator]` — `custom_route` comes from the MCP SDK, which
     # this repo exempts from import typing (see the mypy override for `mcp.*`), so mypy
