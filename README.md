@@ -56,7 +56,7 @@ make audit        # report known CVEs in the locked dependency set
 make help         # every task, with descriptions
 ```
 
-`check` deliberately excludes the dependency audit, which is advisory in CI and
+`check` deliberately excludes the dependency audit, which is advisory in CI, and
 needs network access. Run `make audit` when you want it.
 
 You rarely need to run these by hand — the git hooks cover it.
