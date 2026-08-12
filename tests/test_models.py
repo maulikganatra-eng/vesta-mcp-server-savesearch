@@ -155,6 +155,23 @@ def test_search_filters_decoding_to_a_list_raises() -> None:
         SavedSearchRecord.from_api(raw)
 
 
+@pytest.mark.parametrize("missing_key", ["savedSearchId", "searchName", "searchType", "searchUrl"])
+def test_missing_required_field_raises_typed_error_not_bare_key_error(missing_key: str) -> None:
+    """🔴 The gap flagged in review: these four fields were bare dict indexing.
+
+    A bare KeyError is not a SavedSearchApiError, so it would escape tools.py's
+    `except SavedSearchApiError` as a raw crash instead of the clean
+    {"status": "error", ...} envelope every other failure path in this client
+    produces. Never observed missing on dev -- this is defence for a shape the
+    upstream has not shown us yet, matching how `searchFilters` is already
+    guarded three ways.
+    """
+    raw = dict(_first_record_from("list_baseline"))
+    del raw[missing_key]
+    with pytest.raises(SavedSearchUnexpectedResponseError, match="missing required key"):
+        SavedSearchRecord.from_api(raw)
+
+
 def test_new_listings_count_defaults_to_zero_when_absent() -> None:
     raw = dict(_first_record_from("list_baseline"))
     del raw["newListingsSinceCertainDate"]

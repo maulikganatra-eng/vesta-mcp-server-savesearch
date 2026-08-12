@@ -55,7 +55,12 @@ class SavedSearchRecord:
         Raises :class:`SavedSearchUnexpectedResponseError` if `searchFilters` is present
         but is not parseable JSON — a malformed record should be visible as an
         error, not silently produce an empty dict that then makes every filter
-        look absent.
+        look absent. The same is true of every other required field below: a
+        record missing `savedSearchId`, `searchName`, `searchType` or `searchUrl`
+        raises the same typed error rather than a bare `KeyError`, which is not a
+        `SavedSearchApiError` and would otherwise escape the tool's
+        `except SavedSearchApiError` as a raw crash instead of a clean error
+        envelope.
         """
         raw_filters = raw.get("searchFilters")
         search_filters: dict[str, Any]
@@ -86,12 +91,28 @@ class SavedSearchRecord:
                 f"had an unexpected type: {type(raw_filters).__name__}"
             )
 
+        try:
+            saved_search_id = raw["savedSearchId"]
+            name = raw["searchName"]
+            search_mode = raw["searchType"]
+            search_url = raw["searchUrl"]
+        except KeyError as exc:
+            # A bare KeyError is not a SavedSearchApiError, so it would escape
+            # tools.py's `except SavedSearchApiError` as a raw crash instead of the
+            # clean {"status": "error", ...} envelope every other failure path in
+            # this client produces. Re-raised as the same typed error the
+            # searchFilters decoding above already uses, naming which key was
+            # missing rather than swallowing it into a generic message.
+            raise SavedSearchUnexpectedResponseError(
+                f"record is missing required key {exc.args[0]!r}: {raw!r}"
+            ) from exc
+
         return cls(
-            saved_search_id=raw["savedSearchId"],
-            name=raw["searchName"],
-            search_mode=raw["searchType"],
+            saved_search_id=saved_search_id,
+            name=name,
+            search_mode=search_mode,
             search_filters=search_filters,
-            search_url=raw["searchUrl"],
+            search_url=search_url,
             notification_frequency=schedule_pair_to_frequency(raw.get("notify"), raw.get("scheduleId")),
             new_listings_count=raw.get("newListingsSinceCertainDate") or 0,
             created_at=raw.get("createdDate"),
