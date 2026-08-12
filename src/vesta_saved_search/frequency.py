@@ -71,9 +71,18 @@ def frequency_to_schedule_interval(frequency: str) -> int:
     deliberately, and before any HTTP call is made. See the trap documented on
     :data:`_FREQUENCY_TO_SCHEDULE_INTERVAL`: the API answers a bad value with a
     silent 200, so refusing it here is the only place this mistake can be caught.
+
+    🔴 Matched case-insensitively, discovered running a real end-to-end
+    scenario: the model naturally sends `"Daily"` (matching the confirmation
+    template's own display casing, "Never|Daily|Instantly"), and a strict
+    lookup rejected it as `invalid` even though the intent was completely
+    unambiguous — costing a wasted round trip while the model retried with
+    lowercase. This is the single validating chokepoint every write path
+    (propose, save, update) already goes through, so normalising here once
+    means every caller benefits without having to remember to do it first.
     """
     try:
-        return _FREQUENCY_TO_SCHEDULE_INTERVAL[frequency]
+        return _FREQUENCY_TO_SCHEDULE_INTERVAL[frequency.strip().casefold()]
     except KeyError:
         allowed = ", ".join(sorted(_FREQUENCY_TO_SCHEDULE_INTERVAL))
         raise ValueError(

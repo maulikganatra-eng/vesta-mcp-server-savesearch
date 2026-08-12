@@ -20,7 +20,7 @@ def test_forward_map_is_correct(frequency: str, expected: int) -> None:
     assert frequency_to_schedule_interval(frequency) == expected
 
 
-@pytest.mark.parametrize("bad_value", ["Never", "DAILY", "weekly", "", "3", "0"])
+@pytest.mark.parametrize("bad_value", ["weekly", "", "3", "0", " ", "dailyish"])
 def test_forward_map_rejects_anything_out_of_range(bad_value: str) -> None:
     """🔴 Refuse before any HTTP call — the API accepts out-of-range values with a
     silent 200 and stores them as "never". This is the only place that mistake can
@@ -28,6 +28,18 @@ def test_forward_map_rejects_anything_out_of_range(bad_value: str) -> None:
     """
     with pytest.raises(ValueError, match="unknown notification frequency"):
         frequency_to_schedule_interval(bad_value)
+
+
+@pytest.mark.parametrize(
+    ("frequency", "expected"),
+    [("Never", 0), ("DAILY", 1), ("Instantly", 2), ("  daily  ", 1)],
+)
+def test_forward_map_is_case_and_whitespace_insensitive(frequency: str, expected: int) -> None:
+    """🔴 Discovered running a real end-to-end scenario: the model naturally
+    sends "Daily" (matching the confirmation template's own display casing),
+    and a strict lookup rejected it as invalid, costing a wasted retry round
+    trip even though the intent was completely unambiguous."""
+    assert frequency_to_schedule_interval(frequency) == expected
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,16 @@
+{
+  "_recorded_from": "dev",
+  "_note": "The REQUEST body that produced create_daily.json's stored record (savedSearchId 1089). Copied by hand from scratch/adhoc/record_n2_dev_fixtures.py:125-135 in the orchestrator repo (smart-search-for-guestSide) -- the recorder itself did not persist the outgoing body when this was recorded, only the response. See that script's `write()` function for the gap; a future re-record should add `_request_body` there so this file can be regenerated instead of hand-copied.",
+  "body": {
+    "searchName": "zz-n2-fixture-alolhd-create",
+    "searchFilters": {
+      "mode": "forSale",
+      "city": "Beverly Hills",
+      "homeType": ["0", "1"],
+      "status": "active,comingSoon",
+      "SortBy": "new"
+    },
+    "searchUrl": "explore/listings/for-sale?city=Beverly%20Hills&status=active,comingSoon&mode=forSale&homeType=1&sortBy=new",
+    "scheduleInterval": 1
+  }
+}

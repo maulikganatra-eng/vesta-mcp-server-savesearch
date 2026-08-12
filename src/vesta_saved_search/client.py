@@ -22,15 +22,13 @@ silently**:
 Handling all five in one place means a call site cannot forget one of them —
 five call sites each remembering five traps is twenty-five chances to be wrong.
 
-⚠️ **The page-walking parameter name below is UNVERIFIED against a real paginated
-account.** The dev account used to build the fixtures for this module holds only
-eight records, so `PageSize=200` and no `PageSize` at all returned an identical,
-single, un-truncated page — there was never a second page to observe. See
-`_PAGE_NUMBER_PARAM` for exactly what is and is not confirmed. This is resolved by
-the two-account test data already tracked as a dependency on VA-402 (one account
-must permanently hold more than fifteen records) — confirm the real parameter name
-against it before this client's paging path ever runs against more than one page
-of production data.
+✅ **The page-walking parameter name is now verified against a real paginated
+account.** `tests/test_contract_saved_search.py` (level 3, run against real dev)
+forces `page_size=5`, creates enough throwaway records to cross 15 total, and
+confirms the walk returns every record with no duplicates and no hang — see
+that test for the mechanics, including why it wraps the call in a timeout
+rather than trusting a wrong guess to fail fast on its own. `_PAGE_NUMBER_PARAM`
+below records what was confirmed and how.
 """
 
 from __future__ import annotations
@@ -65,13 +63,12 @@ _LIST_ENDPOINT: Final[str] = "SavedSearches"
 #: multi-page walking without touching this module-level default.
 _DEFAULT_PAGE_SIZE: Final[int] = 200
 
-#: ⚠️ UNVERIFIED. No probe against this API — in this repo or in
-#: `scratch/adhoc/` in the orchestrator repo — has ever requested a second page, so
-#: the *name* the service expects for "give me page 2" has never been observed.
-#: "PageNumber" is the conventional pairing with "PageSize" for this style of API
-#: and is a reasonable first attempt, but it is a guess, not a verified fact, and
-#: it is a single named constant for exactly that reason — so there is one place to
-#: fix once a real multi-page account exists to test against.
+#: ✅ VERIFIED against a real multi-page response by the level-3 paging test in
+#: `tests/test_contract_saved_search.py` (real dev, `page_size=5`, >15 total
+#: records, no duplicate ids, every created record present in the fully-walked
+#: result). Kept as a single named constant regardless — this is exactly the
+#: kind of value that is cheap to get wrong and expensive to debug if the
+#: API's naming ever changes.
 _PAGE_NUMBER_PARAM: Final[str] = "PageNumber"
 
 
