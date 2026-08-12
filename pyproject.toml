@@ -68,6 +68,11 @@ dependencies = [
     # dependency bump, and with Dependabot removed from this repo nothing will
     # propose it accidentally.
     "mcp>=1.28.1,<2",
+    # HTTP client for the GuestSite SavedSearches API (step N2). Same package and
+    # pattern the property-search server's `mls_client.py` already uses
+    # (`httpx.AsyncClient`), and it is what N2's own component tests are specified
+    # against: `httpx.MockTransport` replaying recorded fixtures.
+    "httpx>=0.27.0",
 ]
 
 [dependency-groups]
