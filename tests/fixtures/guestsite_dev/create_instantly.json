@@ -1,0 +1,10 @@
+{
+  "_recorded_from": "dev",
+  "_request_method": "POST",
+  "_request_url": "https://www.dev.themls.com/GuestSiteApi/SavedSearches/saveAI",
+  "_status_code": 200,
+  "body": {
+    "savedSearch": "[{\"savedSearchId\":1090,\"searchNumber\":\"ABC84F0B-8AF6-4407-B5B7-0099F39AD3B8\",\"searchName\":\"zz-n2-fixture-alolhd-instant\",\"searchType\":\"forSale\",\"criteria\":\"<criterias><criteria><field>City<\\/field><value1>Beverly Hills<\\/value1><value2\\/><options\\/><\\/criteria><criteria><field>Status<\\/field><value1>5,55<\\/value1><value2\\/><options\\/><\\/criteria><criteria><field>PropertyType<\\/field><value1>0,1<\\/value1><value2\\/><options\\/><\\/criteria><\\/criterias>\",\"searchFilters\":\"{\\\"city\\\":\\\"Beverly Hills\\\",\\\"status\\\":\\\"active,comingSoon\\\",\\\"mode\\\":\\\"forSale\\\",\\\"homeType\\\":[\\\"0\\\",\\\"1\\\"],\\\"sortBy\\\":\\\"new\\\",\\\"consumerId\\\":1000102087}\",\"searchUrl\":\"explore\\/listings\\/saved-search\\/1090\\/for-sale?city=Beverly%20Hills&status=active,comingSoon&mode=forSale&homeType=1&sortBy=new\",\"lastUpdate\":\"2026-08-12T03:43:30.280\",\"consumerId\":1000102087,\"newListingsSinceCertainDate\":0,\"notify\":true,\"includeOHNotify\":false,\"sourceOf\":2,\"lastRunTime\":\"2026-08-12T03:43:30.280\",\"lastSearchTime\":\"2026-08-12T03:43:30.280\",\"expirationDate\":\"2026-11-10T03:43:30.280\",\"lastViewTime\":null,\"createdDate\":\"2026-08-12T03:43:30.280\",\"allowReverseProspecting\":true,\"notifyChangeType\":null,\"scheduleId\":1,\"pushNotificationEnabled\":false,\"propertyTypes\":\"0,1\"}]",
+    "status": "ok"
+  }
+}

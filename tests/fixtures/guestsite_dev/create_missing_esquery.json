@@ -1,0 +1,7 @@
+{
+  "_recorded_from": "dev",
+  "_request_method": "POST",
+  "_request_url": "https://www.dev.themls.com/GuestSiteApi/SavedSearches/saveAI",
+  "_status_code": 400,
+  "body": "EsQuery cannot be null"
+}
