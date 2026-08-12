@@ -36,8 +36,38 @@ description = "MCP tool server for MLS saved searches (list, propose, save, upda
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
-    # Runtime deps go here. Kept empty until the first real step (N1) needs one,
-    # so `uv sync` on a fresh clone is instant and the lock file starts small.
+    # The official MCP SDK, whose bundled FastMCP this server is built on:
+    # `from mcp.server.fastmcp import Context, FastMCP`. Deliberately the SAME
+    # package the property-search server uses (`mcp[cli]>=1.6.0` there), NOT the
+    # separately-published `fastmcp` distribution — those are different projects
+    # with diverging APIs, and these two servers must speak one protocol.
+    #
+    # The `[cli]` extra is omitted on purpose: it exists for `mcp dev`, pulls in
+    # typer and friends, and the Dockerfile installs this list with --no-dev into
+    # the shipped image. Nothing here needs it.
+    #
+    # The >=1.28.1 floor is not arbitrary. It is the oldest version verified to
+    # provide the two things N1's component test depends on:
+    #   * `ClientSession.call_tool(..., meta={...})`, so a test can put a token on
+    #     the `_meta` channel over a real client instead of faking the protocol
+    #   * `create_connected_server_and_client_session()` accepting a FastMCP app
+    #     directly, which is what makes an in-process level-2b harness possible
+    # Lowering this floor without re-checking both would leave the `_meta`
+    # channel — the one thing N1 exists to prove — untested at the protocol layer.
+    #
+    # 🔴 The `<2` ceiling is load-bearing, not caution. mcp 2.0.0 restructured the
+    # package and REMOVED `mcp.server.fastmcp` (2.0 has `mcp.server.mcpserver`
+    # instead), so an unbounded `>=1.28.1` resolves to 2.0.0 and this server stops
+    # importing — verified, not assumed. It would also silently put us on a
+    # different SDK major than the property-search server, which sits on
+    # `mcp[cli]>=1.6.0` / 1.28.1. Two MCP servers behind one orchestrator pool
+    # should not be a version-skew experiment.
+    #
+    # Upgrading to 2.x is a deliberate, coordinated change across BOTH servers,
+    # with the `_meta` reader re-verified against the new API. It is not a routine
+    # dependency bump, and with Dependabot removed from this repo nothing will
+    # propose it accidentally.
+    "mcp>=1.28.1,<2",
 ]
 
 [dependency-groups]
@@ -198,7 +228,24 @@ markers = [
     "e2e: full stack, slowest",
 ]
 # Turn warnings into failures so a deprecation is a task, not a slow surprise.
-filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
+#
+# Each ignore below is a THIRD-PARTY warning we cannot fix from this repo, scoped to
+# one category so it cannot hide a warning of ours. Do not add a bare "ignore".
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pytest_asyncio.*",
+    # Raised by pydantic-settings the moment `FastMCP(...)` is constructed, because
+    # the SDK's own `Settings` model has a `lifespan` field whose annotation is an
+    # unresolved forward reference. It is emitted inside mcp's constructor, so there
+    # is no call site of ours to fix and no argument we can pass to avoid it — every
+    # test that builds an app would fail on it, including the ones proving the
+    # `_meta` channel works.
+    #
+    # Scoped to this exact category, so a genuine pydantic-settings deprecation still
+    # fails the suite. Remove it when the SDK calls `model_rebuild()` on that model;
+    # the fix belongs upstream in `mcp`, not here.
+    "ignore::pydantic_settings.exceptions.IncompleteFieldDefinitionWarning",
+]
 
 ### -------------------------------------------------------------------------
 ### coverage
