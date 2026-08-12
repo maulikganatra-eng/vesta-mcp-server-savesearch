@@ -261,3 +261,81 @@ async def test_create_shaped_url_from_the_model_cannot_corrupt_the_stored_path()
     assert all(
         "saved-search" not in str(v) for v in proposal.payload["change"].values() if v is not None
     )
+
+
+async def test_generated_name_collision_on_rename_never_asks_the_user() -> None:
+    """🔴 Same 2x2 as the create path, now proven for renames too: a
+    GENERATED name colliding on rename must silently regenerate/fall back,
+    never surface name_exists the way a user-stated collision does."""
+    stored = _record(saved_search_id=42, name="Del Mar Homes")
+    other = _record(saved_search_id=7, name="Malibu Homes", search_filters={"city": "Malibu"})
+    client = _client([stored, other])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(app, _params(name="Malibu Homes", nameWasGenerated=True), _FakeCtx(TOKEN))
+
+    assert result["saved_search"]["status"] == "name_needs_regeneration"
+    assert result["saved_search"]["status"] != "name_exists"
+    client.update.assert_not_called()
+
+
+async def test_generated_name_collision_on_rename_falls_back_after_two_attempts() -> None:
+    stored = _record(saved_search_id=42, name="Del Mar Homes")
+    other = _record(saved_search_id=7, name="Malibu Homes", search_filters={"city": "Malibu"})
+    client = _client([stored, other])
+    store = ProposalStore()
+    app = _app_with(client, store)
+
+    first = await _propose(app, _params(name="Malibu Homes", nameWasGenerated=True), _FakeCtx(TOKEN))
+    assert first["saved_search"]["status"] == "name_needs_regeneration"
+
+    second = await _propose(app, _params(name="Malibu Homes", nameWasGenerated=True), _FakeCtx(TOKEN))
+
+    assert second["saved_search"]["status"] == "ready"
+    assert second["saved_search"]["name"] != "Malibu Homes"
+
+
+async def test_user_stated_over_length_name_on_rename_is_invalid_not_regenerated() -> None:
+    stored = _record(saved_search_id=42)
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(app, _params(name="X" * 100, nameWasGenerated=False), _FakeCtx(TOKEN))
+
+    assert result["saved_search"]["status"] == "invalid"
+    client.update.assert_not_called()
+
+
+async def test_generated_over_length_name_on_rename_regenerates_then_falls_back() -> None:
+    stored = _record(saved_search_id=42)
+    client = _client([stored])
+    store = ProposalStore()
+    app = _app_with(client, store)
+
+    first = await _propose(app, _params(name="X" * 100, nameWasGenerated=True), _FakeCtx(TOKEN))
+    assert first["saved_search"]["status"] == "name_needs_regeneration"
+
+    second = await _propose(app, _params(name="Y" * 100, nameWasGenerated=True), _FakeCtx(TOKEN))
+    assert second["saved_search"]["status"] == "ready"
+    assert len(second["saved_search"]["name"]) <= 60
+
+
+async def test_resending_display_cased_frequency_during_a_pure_rename_is_not_a_change() -> None:
+    """🔴 The update path's frequency-changed check must be casefolded too --
+    otherwise resending "Daily" (display casing) during a pure rename would
+    register a phantom frequency change and bypass the exact casefold fix
+    this PR adds to frequency_to_schedule_interval."""
+    stored = _record(saved_search_id=42, notification_frequency="daily")
+    client = _client([stored])
+    store = ProposalStore()
+    app = _app_with(client, store)
+
+    result = await _propose(
+        app, _params(name="New Name", notificationFrequency="Daily"), _FakeCtx(TOKEN)
+    )
+
+    assert result["saved_search"]["status"] == "ready"
+    proposal = store.get(result["saved_search"]["proposalId"], user_key_from_token(TOKEN))
+    assert proposal is not None
+    assert "notification_frequency" not in proposal.payload["change"]
+    assert proposal.payload["change"]["name"] == "New Name"

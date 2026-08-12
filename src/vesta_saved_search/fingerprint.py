@@ -119,6 +119,15 @@ def criteria_fingerprint(search_filters: dict[str, Any], search_mode: str) -> st
     resulting duplicate message so this does not read as a bug to the user.
     """
     canonical = _canonicalise(search_filters)
+    # 🔴 `_canonicalise` already casefolds every key from `search_filters`, so
+    # a literal `searchMode`/`SearchMode` key in the input (distinct from
+    # `mode`, which real payloads use and which IS dropped) would already be
+    # sitting in `canonical` under the casefolded key `"searchmode"` -- a
+    # DIFFERENT dict key from the mixed-case `"searchMode"` set below. Popping
+    # it first guarantees exactly one entry ever represents the search mode,
+    # so a round-tripped record that happened to carry that field can never
+    # fingerprint differently from a freshly built payload that omits it.
+    canonical.pop("searchmode", None)
     canonical["searchMode"] = search_mode.strip().casefold()
     encoded = json.dumps(canonical, sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

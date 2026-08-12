@@ -104,8 +104,18 @@ async def apply_update(
     *,
     saved_search_id: int,
     change: UpdateChange,
+    records: list[SavedSearchRecord] | None = None,
 ) -> SavedSearchRecord:
     """Run the six-step update recipe and return the record GuestSite stored.
+
+    `records`, when given, is used instead of this function re-fetching the
+    caller's full list itself — for a caller (`save_search`'s update branch)
+    that already fetched the same list microseconds earlier for its own
+    live duplicate re-checks, with nothing async in between that could have
+    gone stale meaningfully. Left `None` in every other case (including
+    every test in this module), which re-fetches internally so step 1's
+    "immediately before writing" guarantee still holds for a caller that has
+    no reason to have a list already in hand.
 
     Raises :class:`~vesta_saved_search.errors.SavedSearchUnexpectedResponseError`
     if `saved_search_id` is not found in the caller's own list, if a criteria
@@ -117,7 +127,8 @@ async def apply_update(
     so a tool built on it can catch one base class for everything.
     """
     # Step 1: GET the full record, immediately before writing.
-    records = await client.list_saved_searches(token)
+    if records is None:
+        records = await client.list_saved_searches(token)
     current = next((r for r in records if r.saved_search_id == saved_search_id), None)
     if current is None:
         raise SavedSearchUnexpectedResponseError(

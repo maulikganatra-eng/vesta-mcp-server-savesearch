@@ -45,6 +45,7 @@ from vesta_saved_search.errors import (
     SavedSearchUpstreamError,
 )
 from vesta_saved_search.frequency import frequency_to_schedule_interval
+from vesta_saved_search.http_support import request_or_upstream_error
 from vesta_saved_search.models import SavedSearchRecord
 
 #: The endpoint both creates and updates a record. Presence of `savedSearchId` in
@@ -208,14 +209,10 @@ class SavedSearchClient:
         json_body: dict[str, Any] | None = None,
     ) -> httpx.Response:
         url = f"{self._base_url}/{path}"
-        try:
-            response = await self._http.request(
-                method, url, params=params, json=json_body, headers=self._headers(token)
-            )
-        except httpx.TimeoutException as exc:
-            raise SavedSearchUpstreamError(f"{method} {path} timed out") from exc
-        except httpx.RequestError as exc:
-            raise SavedSearchUpstreamError(f"{method} {path} failed: {exc}") from exc
+        response = await request_or_upstream_error(
+            self._http.request(method, url, params=params, json=json_body, headers=self._headers(token)),
+            description=f"{method} {path}",
+        )
 
         if response.status_code == 400:
             self._raise_for_400(response)

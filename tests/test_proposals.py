@@ -83,6 +83,29 @@ def test_current_returns_the_one_pending_proposal() -> None:
     assert store.current(user_key) is proposal
 
 
+def test_current_returns_none_once_consumed() -> None:
+    """🔴 Without this, a user who completes one save and then starts a
+    second, unrelated one within the same TTL window would have `current()`
+    hand back the FIRST save's already-executed proposal -- causing the new
+    one to wrongly report a `previousName` implying it renames the old one."""
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN_A)
+    proposal = store.put(user_key, action="save", payload={}, name="X", fingerprint="fp")
+    store.mark_consumed(proposal, result={"savedSearchId": 1})
+    assert store.current(user_key) is None
+
+
+def test_current_filters_by_action_when_given() -> None:
+    """A pending `update` or `delete` proposal must not be mistaken for a
+    pending `save` when a caller only wants save-flow continuity."""
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN_A)
+    store.put(user_key, action="delete", payload={}, name="X", fingerprint="fp")
+    assert store.current(user_key, action="save") is None
+    assert store.current(user_key, action="delete") is not None
+    assert store.current(user_key) is not None
+
+
 def test_ttl_expiry_via_injected_clock() -> None:
     # created_at reads 0.0; get() reads 100.0 -- past a 10s TTL.
     store = ProposalStore(ttl_seconds=10.0, clock=_clock([0.0, 100.0, 100.0]))
@@ -97,6 +120,23 @@ def test_not_yet_expired_is_still_retrievable() -> None:
     user_key = user_key_from_token(TOKEN_A)
     proposal = store.put(user_key, action="save", payload={}, name="X", fingerprint="fp")
     assert store.get(proposal.proposal_id, user_key) is proposal
+
+
+def test_put_sweeps_another_users_expired_proposal() -> None:
+    """🔴 Memory-bound proof: a consumed-or-abandoned proposal from a
+    DIFFERENT user is evicted opportunistically on the next put() from
+    anyone, rather than sitting in the store for the life of the process --
+    `get()`/`current()` alone only evict lazily, on access to that ONE
+    proposal, which a completed proposal never gets again."""
+    store = ProposalStore(ttl_seconds=10.0, clock=_clock([0.0, 100.0, 100.0]))
+    key_a = user_key_from_token(TOKEN_A)
+    proposal_a = store.put(key_a, action="save", payload={}, name="X", fingerprint="fp")
+
+    key_b = user_key_from_token(TOKEN_B)
+    store.put(key_b, action="save", payload={}, name="Y", fingerprint="fp2")
+
+    assert proposal_a.proposal_id not in store._by_id
+    assert key_a not in store._by_user
 
 
 def test_mark_consumed_keeps_the_proposal_retrievable_for_replay_detection() -> None:

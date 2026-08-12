@@ -40,6 +40,7 @@ from vesta_saved_search.errors import (
     SavedSearchUnexpectedResponseError,
     SavedSearchUpstreamError,
 )
+from vesta_saved_search.http_support import request_or_upstream_error
 
 _ES_QUERY_PATH: Final[str] = "internal/es-query"
 
@@ -107,12 +108,9 @@ class EsQueryClient:
         """
         url = f"{self._base_url}/{_ES_QUERY_PATH}"
         body = {"searchFilters": search_filters, "searchMode": search_mode}
-        try:
-            response = await self._http.post(url, json=body)
-        except httpx.TimeoutException as exc:
-            raise SavedSearchUpstreamError(f"es-query request timed out: {exc}") from exc
-        except httpx.RequestError as exc:
-            raise SavedSearchUpstreamError(f"es-query request failed: {exc}") from exc
+        response = await request_or_upstream_error(
+            self._http.post(url, json=body), description="es-query request"
+        )
 
         if response.status_code == 400:
             # Only reachable if this client ever sends a malformed body,

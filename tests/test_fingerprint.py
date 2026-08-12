@@ -107,6 +107,17 @@ def test_whitespace_and_casing_do_not_change_the_result() -> None:
     assert a == b
 
 
+def test_a_literal_searchmode_key_in_filters_does_not_produce_a_different_fingerprint() -> None:
+    """🔴 A `searchFilters` dict that happens to carry a literal `searchMode`
+    key (distinct from `mode`) must not coexist with the explicit key this
+    function adds -- that would fingerprint a round-tripped record
+    differently from a freshly built payload lacking the duplicate key,
+    silently defeating duplicate detection for that record."""
+    with_literal_key = criteria_fingerprint({"city": "Del Mar", "searchMode": "forSale"}, "forSale")
+    without = criteria_fingerprint({"city": "Del Mar"}, "forSale")
+    assert with_literal_key == without
+
+
 def test_unsupported_filters_have_no_effect() -> None:
     """`unsupportedFilters` is not a parameter at all -- excluded by construction.
 

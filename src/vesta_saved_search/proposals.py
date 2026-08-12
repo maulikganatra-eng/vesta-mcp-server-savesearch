@@ -173,6 +173,17 @@ class ProposalStore:
         request replaced it gets the same `proposal_expired` a genuinely
         unknown id would, never a stale write.
         """
+        # 🔴 Opportunistic sweep, not just this user's prior entry. Without
+        # it, a proposal from a user who never returns to confirm or
+        # re-propose sits in `_by_id`/`_by_user` for the life of the process
+        # -- `get()`/`current()` only evict lazily, on access to that ONE
+        # proposal, and a completed (`consumed`) proposal is never accessed
+        # again in the normal flow. Sweeping every expired entry on every
+        # `put()` bounds this store's memory by "distinct users active
+        # within one TTL window", not "distinct users ever", with no
+        # background task required.
+        self._sweep_expired()
+
         prior = self._by_user.get(user_key)
         if prior is not None:
             self._by_id.pop(prior.proposal_id, None)
@@ -208,15 +219,28 @@ class ProposalStore:
             return None
         return proposal
 
-    def current(self, user_key: str) -> Proposal | None:
-        """The user's one pending proposal, if any and not expired.
+    def current(self, user_key: str, *, action: ProposalAction | None = None) -> Proposal | None:
+        """The user's one TRULY PENDING proposal, if any.
 
-        Used by `propose_saved_search` to decide re-proposal fields
-        (`previousName`) against whatever the user was already shown, without
-        needing the model to supply the prior proposal's id.
+        "Pending" means not expired AND not already consumed. `mark_consumed`
+        deliberately leaves a completed proposal in place (for idempotent
+        replay detection via `get()`), so without the `consumed` check here,
+        a user who completes one save and then starts a second, unrelated
+        one within the same TTL window would have this method hand back the
+        FIRST save's already-executed proposal — `propose_saved_search`
+        would then wrongly report a `previousName` implying the new proposal
+        is a rename of the old one.
+
+        `action`, when given, further restricts the match to that action —
+        used by `propose_saved_search`'s create path, which only wants
+        `previousName` continuity against another PENDING SAVE, never
+        against an unrelated pending `update` or `delete` proposal for a
+        completely different record.
         """
         proposal = self._by_user.get(user_key)
-        if proposal is None or self._expired(proposal):
+        if proposal is None or self._expired(proposal) or proposal.consumed:
+            return None
+        if action is not None and proposal.action != action:
             return None
         return proposal
 
@@ -269,6 +293,19 @@ class ProposalStore:
         self._by_id.pop(proposal.proposal_id, None)
         if self._by_user.get(proposal.user_key) is proposal:
             del self._by_user[proposal.user_key]
+
+    def _sweep_expired(self) -> None:
+        """Evict every expired entry, not just one proposal being accessed.
+
+        A consumed proposal that is never revisited is only ever expired,
+        never re-fetched by `get()`/`current()` — those methods evict lazily
+        on access, which never happens for it again. Iterates a snapshot of
+        `_by_id` (not the live dict) since `_forget` mutates both indexes
+        during the loop.
+        """
+        for proposal in list(self._by_id.values()):
+            if self._expired(proposal):
+                self._forget(proposal)
 
 
 __all__ = ["Proposal", "ProposalAction", "ProposalStore", "user_key_from_token"]

@@ -163,3 +163,33 @@ def test_fallback_name_truncates_to_max_length() -> None:
 
 def test_fallback_name_handles_blank_summary() -> None:
     assert fallback_name("   ", max_length=60) == "Saved Search"
+
+
+def test_fallback_name_strips_words_that_mention_unsupported_filters() -> None:
+    """🔴 The fallback must not reintroduce the exact defect
+    mentions_unsupported_filter exists to prevent -- a summary that itself
+    names an unsupported filter must have that word dropped."""
+    result = fallback_name(
+        "Del Mar with a home theater",
+        max_length=60,
+        unsupported_filters=["home theater"],
+    )
+    assert "theater" not in result.lower()
+    assert "Del Mar" in result
+
+
+def test_fallback_name_with_no_unsupported_filters_is_unchanged() -> None:
+    result = fallback_name("Del Mar, 2+ bed", max_length=60, unsupported_filters=[])
+    assert result == "Del Mar, 2+ bed Search"
+
+
+def test_fallback_name_with_only_stopwords_in_unsupported_filters_is_unchanged() -> None:
+    """No significant word survives the stopword/length filter, so there is
+    nothing to strip -- the summary passes through untouched."""
+    result = fallback_name("Del Mar, 2+ bed", max_length=60, unsupported_filters=["with a"])
+    assert result == "Del Mar, 2+ bed Search"
+
+
+def test_fallback_name_that_becomes_blank_after_stripping_falls_back_to_saved_search() -> None:
+    result = fallback_name("home theater", max_length=60, unsupported_filters=["home theater"])
+    assert result == "Saved Search"

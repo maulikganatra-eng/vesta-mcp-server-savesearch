@@ -159,7 +159,9 @@ def mentions_unsupported_filter(name: str, unsupported_filters: list[str]) -> bo
     return False
 
 
-def fallback_name(criteria_summary: str, *, max_length: int) -> str:
+def fallback_name(
+    criteria_summary: str, *, max_length: int, unsupported_filters: list[str] | None = None
+) -> str:
     """The deterministic name used after naming has failed twice.
 
     Built from `criteriaSummary` — the human-readable summary the model
@@ -168,8 +170,32 @@ def fallback_name(criteria_summary: str, *, max_length: int) -> str:
     and deterministic on purpose: this path exists specifically so a test
     can assert its output exactly, and so a name generation loop the model
     keeps getting wrong has a guaranteed exit that a user can still read.
+
+    🔴 `unsupported_filters` is re-checked here too, not just on the
+    generated candidates this function replaces. Without this, a fallback
+    built purely from `criteriaSummary` could reintroduce the exact defect
+    `mentions_unsupported_filter` exists to prevent — e.g. a summary that
+    itself says "...with a home theater" for an unsupported `homeType`
+    filter. Any significant word shared with an unsupported filter phrase is
+    dropped from the summary before the fallback is built, rather than
+    rejecting the fallback outright — this path has no further escalation
+    left, so it must always produce *something* usable.
     """
     base = criteria_summary.strip()
+    if unsupported_filters:
+        forbidden_words = {
+            word
+            for phrase in unsupported_filters
+            for word in _WORD.findall(phrase.lower())
+            if word not in _STOPWORDS and len(word) >= _MIN_SIGNIFICANT_WORD_LENGTH
+        }
+        if forbidden_words:
+            kept = [
+                token
+                for token in base.split()
+                if "".join(_WORD.findall(token.lower())) not in forbidden_words
+            ]
+            base = " ".join(kept).strip()
     candidate = f"{base} Search" if base else "Saved Search"
     return candidate[:max_length]
 

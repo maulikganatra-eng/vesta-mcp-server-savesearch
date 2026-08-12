@@ -30,7 +30,7 @@ from vesta_saved_search.naming import (
     normalise_name,
     url_matches_filters,
 )
-from vesta_saved_search.proposals import Proposal, ProposalStore, user_key_from_token
+from vesta_saved_search.proposals import Proposal, ProposalAction, ProposalStore, user_key_from_token
 from vesta_saved_search.updates import UpdateChange, apply_update
 
 #: The single top-level key of every response this server's tools return.
@@ -279,36 +279,90 @@ def register_tools(
                     }
                 }
 
+        update_fingerprint = new_fingerprint if criteria_changed else current_fingerprint
         name_changed = normalise_name(params.name) != normalise_name(current.name)
+        final_name = current.name
+        regeneration_attempts = 0
+
         if name_changed:
             name_collision = find_by_name(others, params.name)
             if name_collision is not None:
-                return {_ENVELOPE_KEY: {"status": "name_exists", "existingName": name_collision.name}}
-            if len(params.name) > SAVED_SEARCH_NAME_MAX_LENGTH:
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "invalid",
-                        "message": f"name exceeds {SAVED_SEARCH_NAME_MAX_LENGTH} characters",
+                if not params.nameWasGenerated:
+                    # Same 2x2 as the create path: a user-STATED collision
+                    # always reaches the user; a GENERATED one never does.
+                    return {
+                        _ENVELOPE_KEY: {
+                            "status": "name_exists",
+                            "existingName": name_collision.name,
+                        }
                     }
-                }
+                regeneration_attempts = store.note_naming_failure(user_key, update_fingerprint)
+                if regeneration_attempts < 2:
+                    return {
+                        _ENVELOPE_KEY: {
+                            "status": "name_needs_regeneration",
+                            "reason": "name_collision",
+                            "takenNames": [record.name for record in existing],
+                        }
+                    }
+                final_name = fallback_name(
+                    params.criteriaSummary,
+                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+                    unsupported_filters=params.unsupportedFilters,
+                )
+            elif len(params.name) > SAVED_SEARCH_NAME_MAX_LENGTH:
+                if not params.nameWasGenerated:
+                    return {
+                        _ENVELOPE_KEY: {
+                            "status": "invalid",
+                            "message": f"name exceeds {SAVED_SEARCH_NAME_MAX_LENGTH} characters",
+                        }
+                    }
+                regeneration_attempts = store.note_naming_failure(user_key, update_fingerprint)
+                if regeneration_attempts < 2:
+                    return {
+                        _ENVELOPE_KEY: {
+                            "status": "name_needs_regeneration",
+                            "reason": "name_too_long",
+                            "takenNames": [record.name for record in existing],
+                        }
+                    }
+                final_name = fallback_name(
+                    params.criteriaSummary,
+                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+                    unsupported_filters=params.unsupportedFilters,
+                )
+            else:
+                final_name = params.name
 
+        store.clear_naming_attempts(user_key, update_fingerprint)
+
+        # 🔴 Casefolded, matching frequency.py's own case-insensitive lookup
+        # -- a raw `!=` here would treat the model resending "Daily" during
+        # a pure rename as a real frequency change, bypassing the exact
+        # casefold fix this PR adds to `frequency_to_schedule_interval`.
+        frequency_changed = (
+            params.notificationFrequency.strip().casefold() != current.notification_frequency
+        )
+
+        renamed = normalise_name(final_name) != normalise_name(current.name)
         change: dict[str, Any] = {}
-        if name_changed:
-            change["name"] = params.name
-        if params.notificationFrequency != current.notification_frequency:
+        if renamed:
+            change["name"] = final_name
+        if frequency_changed:
             change["notification_frequency"] = params.notificationFrequency
         if criteria_changed:
             change["search_filters"] = params.searchFilters
             change["fresh_es_query"] = params.esQuery
             change["new_search_url_query"] = urlsplit(params.searchUrl).query
 
-        final_name = params.name if name_changed else current.name
         proposal = store.put(
             user_key,
             action="update",
             payload={"saved_search_id": params.savedSearchId, "change": change},
             name=final_name,
-            fingerprint=new_fingerprint if criteria_changed else current_fingerprint,
+            fingerprint=update_fingerprint,
+            regeneration_attempts=regeneration_attempts,
         )
 
         response: dict[str, Any] = {
@@ -352,6 +406,17 @@ def register_tools(
                         "existingName": duplicate.name,
                     }
                 }
+            # Re-asserted here too, even though propose already checked it --
+            # aligning with save_search's create-confirm branch a few dozen
+            # lines below, which re-runs its own URL/filters check at write
+            # time rather than trusting the propose-time result alone.
+            if not url_matches_filters(f"?{change.new_search_url_query or ''}", change.search_filters):
+                return {
+                    _ENVELOPE_KEY: {
+                        "status": "invalid",
+                        "message": "searchUrl no longer matches searchFilters",
+                    }
+                }
 
         if change.name is not None:
             name_collision = find_by_name(others, change.name)
@@ -360,7 +425,12 @@ def register_tools(
 
         try:
             record = await apply_update(
-                client, es_client, token, saved_search_id=saved_search_id, change=change
+                client,
+                es_client,
+                token,
+                saved_search_id=saved_search_id,
+                change=change,
+                records=existing,
             )
         except SavedSearchApiError as exc:
             # Never a success status for an upstream failure -- covers the
@@ -505,15 +575,19 @@ def register_tools(
                         "takenNames": [record.name for record in existing],
                     }
                 }
-            final_name = fallback_name(params.criteriaSummary, max_length=SAVED_SEARCH_NAME_MAX_LENGTH)
+            final_name = fallback_name(
+                params.criteriaSummary,
+                max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+                unsupported_filters=params.unsupportedFilters,
+            )
             used_fallback = True
 
         if params.nameWasGenerated and not used_fallback:
             # 🔴 The highest-value naming check: a generated name is never
             # allowed to mention something this search cannot actually
-            # filter on. Only checked pre-fallback -- the fallback name is
-            # built from `criteriaSummary` alone and is not re-validated
-            # against it, a documented simplification (see naming.py).
+            # filter on. Checked pre-fallback too -- `fallback_name` itself
+            # also strips any word shared with `unsupportedFilters`, so the
+            # guarantee holds for both paths, not just the one below.
             too_long = len(final_name) > SAVED_SEARCH_NAME_MAX_LENGTH
             if too_long or mentions_unsupported_filter(final_name, params.unsupportedFilters):
                 regeneration_attempts = store.note_naming_failure(user_key, fingerprint)
@@ -527,7 +601,9 @@ def register_tools(
                         }
                     }
                 final_name = fallback_name(
-                    params.criteriaSummary, max_length=SAVED_SEARCH_NAME_MAX_LENGTH
+                    params.criteriaSummary,
+                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+                    unsupported_filters=params.unsupportedFilters,
                 )
                 used_fallback = True
 
@@ -549,7 +625,7 @@ def register_tools(
         # user-stated name (we never second-guess a name the user chose)
         # and never when nothing about the name actually changed.
         previous_name: str | None = None
-        current_proposal = store.current(user_key)
+        current_proposal = store.current(user_key, action="save")
         if (
             current_proposal is not None
             and params.nameWasGenerated
@@ -586,6 +662,49 @@ def register_tools(
             response["previousName"] = previous_name
         return {_ENVELOPE_KEY: response}
 
+    def _resolve_confirmed_proposal(
+        proposal_id: str,
+        user_key: str,
+        *,
+        confirmed: bool | None,
+        expected_actions: tuple[ProposalAction, ...],
+        already_done_status: str,
+    ) -> dict[str, Any] | Proposal:
+        """The confirm-guard sequence shared by `save_search` and `delete_saved_search`.
+
+        Returns either an envelope dict the caller should return immediately
+        (not confirmed, unknown/expired/foreign id, action mismatch, or a
+        replay of an already-consumed proposal), or the validated
+        `Proposal` to proceed with. Factored out so the two writers cannot
+        drift on this sequence independently — they already had (and keep,
+        deliberately) one real difference, `already_done_status`
+        (`already_saved` vs `already_deleted`), and the next propose/confirm
+        verb would otherwise need a third hand-copied version with no
+        guardrail against getting a step wrong or out of order.
+        """
+        if confirmed is not True:
+            return {_ENVELOPE_KEY: {"status": "not_confirmed"}}
+
+        proposal = store.get(proposal_id, user_key)
+        if proposal is None:
+            # Collapses "unknown", "expired" AND "belongs to another user"
+            # into one response -- see ProposalStore.get's docstring for why
+            # that collapse is the point. A's proposalId with B's token
+            # lands here, indistinguishable from an id that never existed.
+            return {_ENVELOPE_KEY: {"status": "proposal_expired"}}
+
+        if proposal.action not in expected_actions:
+            return {_ENVELOPE_KEY: {"status": "proposal_action_mismatch"}}
+
+        if proposal.consumed:
+            # Idempotent replay: the same proposalId confirmed twice acts
+            # once. Returns the ORIGINAL result rather than re-deriving one,
+            # so a crashed client retrying its own successful request sees
+            # the same outcome it already got.
+            return {_ENVELOPE_KEY: {"status": already_done_status, **(proposal.result or {})}}
+
+        return proposal
+
     @app.tool(name="save_search")
     async def save_search(params: SaveSearchParams, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
         """The writer for both creates and updates. Input is `{proposalId, confirmed}`.
@@ -608,27 +727,17 @@ def register_tools(
         if token is None:
             return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
 
-        if params.confirmed is not True:
-            return {_ENVELOPE_KEY: {"status": "not_confirmed"}}
-
         user_key = user_key_from_token(token)
-        proposal = store.get(params.proposalId, user_key)
-        if proposal is None:
-            # Collapses "unknown", "expired" AND "belongs to another user"
-            # into one response -- see ProposalStore.get's docstring for why
-            # that collapse is the point. A's proposalId with B's token
-            # lands here, indistinguishable from an id that never existed.
-            return {_ENVELOPE_KEY: {"status": "proposal_expired"}}
-
-        if proposal.action not in ("save", "update"):
-            return {_ENVELOPE_KEY: {"status": "proposal_action_mismatch"}}
-
-        if proposal.consumed:
-            # Idempotent replay: the same proposalId confirmed twice writes
-            # once. Returns the ORIGINAL result rather than re-deriving one,
-            # so a crashed client retrying its own successful request sees
-            # the same record it already created.
-            return {_ENVELOPE_KEY: {"status": "already_saved", **(proposal.result or {})}}
+        resolved = _resolve_confirmed_proposal(
+            params.proposalId,
+            user_key,
+            confirmed=params.confirmed,
+            expected_actions=("save", "update"),
+            already_done_status="already_saved",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        proposal = resolved
 
         if proposal.action == "update":
             return await _confirm_update(proposal, token)
@@ -805,22 +914,20 @@ def register_tools(
 
         # Confirm shape: proposalId + confirmed. The pydantic validator
         # guarantees proposalId is set whenever savedSearchId is not.
-        if params.confirmed is not True:
-            return {_ENVELOPE_KEY: {"status": "not_confirmed"}}
-
         proposal_id = params.proposalId
         if proposal_id is None:  # pragma: no cover - unreachable, guarded by the model validator
             return {_ENVELOPE_KEY: {"status": "invalid", "message": "proposalId is required"}}
 
-        stashed_proposal = store.get(proposal_id, user_key)
-        if stashed_proposal is None:
-            return {_ENVELOPE_KEY: {"status": "proposal_expired"}}
-
-        if stashed_proposal.action != "delete":
-            return {_ENVELOPE_KEY: {"status": "proposal_action_mismatch"}}
-
-        if stashed_proposal.consumed:
-            return {_ENVELOPE_KEY: {"status": "already_deleted", **(stashed_proposal.result or {})}}
+        resolved = _resolve_confirmed_proposal(
+            proposal_id,
+            user_key,
+            confirmed=params.confirmed,
+            expected_actions=("delete",),
+            already_done_status="already_deleted",
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        stashed_proposal = resolved
 
         saved_search_id = stashed_proposal.payload["saved_search_id"]
         try:

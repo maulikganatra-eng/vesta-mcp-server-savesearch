@@ -252,3 +252,63 @@ async def test_deleted_record_at_confirm_time_becomes_a_clean_error() -> None:
 
     assert result["saved_search"]["status"] == "error"
     client.update.assert_not_called()
+
+
+async def test_live_list_failure_at_confirm_time_becomes_an_error_envelope() -> None:
+    client = AsyncMock(spec=SavedSearchClient)
+    client.list_saved_searches.side_effect = SavedSearchUpstreamError("upstream is down")
+    es_client = _es_query_client()
+    store = ProposalStore()
+    proposal_id = _stash_update_proposal(store, change={"name": "New Name"})
+    app = _app_with(client, store, es_client)
+
+    result = await _confirm(app, proposal_id)
+
+    assert result["saved_search"]["status"] == "error"
+    client.update.assert_not_called()
+
+
+async def test_url_consistency_is_re_checked_at_confirm_time_for_criteria_changes() -> None:
+    """🔴 Aligns the update-confirm branch with save_search's create-confirm
+    branch: a criteria-changing update must re-validate searchUrl against
+    searchFilters at write time too, not just at propose time."""
+    stored = _record()
+    client = _client([stored])
+    es_client = _es_query_client()
+    store = ProposalStore()
+    # A tampered/inconsistent stash: filters say Malibu, but the query
+    # string carries a contradictory area code -- the exact shape the
+    # propose-time check would have refused, simulating a stash built by a
+    # code path that skipped it.
+    proposal_id = _stash_update_proposal(
+        store,
+        change={
+            "search_filters": {"city": "Malibu"},
+            "fresh_es_query": '{"bool": {}}',
+            "new_search_url_query": "area=11",
+        },
+        fingerprint=criteria_fingerprint({"city": "Malibu"}, "forSale"),
+    )
+    app = _app_with(client, store, es_client)
+
+    result = await _confirm(app, proposal_id)
+
+    assert result["saved_search"]["status"] == "invalid"
+    client.update.assert_not_called()
+
+
+async def test_apply_update_reuses_the_already_fetched_list_not_a_second_call() -> None:
+    """🔴 `_confirm_update` and `apply_update`'s own step 1 must not each
+    fetch the caller's full saved-search list independently -- that is a
+    full pagination walk paid twice for the same data, microseconds apart."""
+    stored = _record()
+    client = _client([stored])
+    es_client = _es_query_client()
+    store = ProposalStore()
+    proposal_id = _stash_update_proposal(store, change={"name": "New Name"})
+    app = _app_with(client, store, es_client)
+
+    result = await _confirm(app, proposal_id)
+
+    assert result["saved_search"]["status"] == "ok"
+    client.list_saved_searches.assert_awaited_once()
