@@ -36,11 +36,8 @@ from typing import Any, Final, Literal
 
 import httpx
 
-from vesta_saved_search.errors import (
-    SavedSearchUnexpectedResponseError,
-    SavedSearchUpstreamError,
-)
-from vesta_saved_search.http_support import request_or_upstream_error
+from vesta_saved_search.errors import SavedSearchUnexpectedResponseError
+from vesta_saved_search.http_support import request_or_upstream_error, upstream_error_for_status
 
 _ES_QUERY_PATH: Final[str] = "internal/es-query"
 
@@ -118,16 +115,14 @@ class EsQueryClient:
             # still surfaced as an upstream error rather than crashing the
             # tool call, since the correct user-facing behaviour ("couldn't
             # do that right now") is identical either way.
-            raise SavedSearchUpstreamError(
-                f"es-query endpoint rejected the request as malformed: {response.text[:200]}"
+            raise upstream_error_for_status(
+                "es-query endpoint rejected the request as malformed", response
             )
         if response.status_code == 502:
-            raise SavedSearchUpstreamError(
-                f"es-query endpoint's MLS dependency failed: {response.text[:200]}"
-            )
+            raise upstream_error_for_status("es-query endpoint's MLS dependency failed", response)
         if response.status_code >= 400:
-            raise SavedSearchUpstreamError(
-                f"es-query endpoint returned an unexpected {response.status_code}: {response.text[:200]}"
+            raise upstream_error_for_status(
+                f"es-query endpoint returned an unexpected {response.status_code}", response
             )
 
         try:

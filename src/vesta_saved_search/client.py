@@ -42,10 +42,9 @@ from vesta_saved_search.errors import (
     SavedSearchInvalidRequestError,
     SavedSearchNameExistsError,
     SavedSearchUnexpectedResponseError,
-    SavedSearchUpstreamError,
 )
 from vesta_saved_search.frequency import frequency_to_schedule_interval
-from vesta_saved_search.http_support import request_or_upstream_error
+from vesta_saved_search.http_support import request_or_upstream_error, upstream_error_for_status
 from vesta_saved_search.models import SavedSearchRecord
 
 #: The endpoint both creates and updates a record. Presence of `savedSearchId` in
@@ -217,12 +216,10 @@ class SavedSearchClient:
         if response.status_code == 400:
             self._raise_for_400(response)
         elif response.status_code >= 500:
-            raise SavedSearchUpstreamError(
-                f"{method} {path} returned {response.status_code}: {response.text[:200]}"
-            )
+            raise upstream_error_for_status(f"{method} {path} returned {response.status_code}", response)
         elif response.status_code >= 400:
-            raise SavedSearchUpstreamError(
-                f"{method} {path} returned an unexpected {response.status_code}: {response.text[:200]}"
+            raise upstream_error_for_status(
+                f"{method} {path} returned an unexpected {response.status_code}", response
             )
         return response
 

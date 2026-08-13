@@ -104,6 +104,13 @@ class Proposal:
     regeneration_attempts: int
     created_at: float
     consumed: bool = False
+    #: True while a confirm is actively executing this proposal's upstream
+    #: call, from `ProposalStore.claim` until either `mark_consumed` or
+    #: `release`. See `ProposalStore.claim`'s docstring for the race this
+    #: closes: without it, two overlapping confirms of the same `proposalId`
+    #: (e.g. a client-side retry) could both pass the `consumed` check
+    #: before either finishes its upstream call, and both execute it.
+    claimed: bool = False
     #: What to hand back on an idempotent replay of an already-consumed
     #: proposal — e.g. the created record's id — so `save_search` can answer
     #: `already_saved` with something concrete rather than a bare status.
@@ -145,14 +152,16 @@ class ProposalStore:
         self._by_id: dict[str, Proposal] = {}
         self._by_user: dict[str, Proposal] = {}
         # Naming-failure counts for a save attempt still in progress -- see
-        # `note_naming_failure`. Deliberately NOT expired by the same TTL as
-        # proposals: an unresolved naming loop that runs longer than a
-        # proposal's TTL is still the same single conversation turn from the
-        # user's point of view, and losing the count early would let a
-        # generated name mentioning `unsupportedFilters` slip through on a
-        # slow third attempt that should have gone to the deterministic
-        # fallback on the second.
-        self._naming_attempts: dict[tuple[str, str], int] = {}
+        # `note_naming_failure`. Each entry's timestamp refreshes on every
+        # failure, so an active naming loop that runs longer than one TTL
+        # window keeps its count (losing it early would let a generated name
+        # mentioning `unsupportedFilters` slip through on a slow third
+        # attempt that should have gone to the deterministic fallback on the
+        # second). An ABANDONED loop, however, still ages out -- see
+        # `_sweep_expired` -- rather than sitting in this dict for the life
+        # of the process, unlike `_by_id`/`_by_user` which were already
+        # swept on every `put()` and this dict originally was not.
+        self._naming_attempts: dict[tuple[str, str], tuple[int, float]] = {}
 
     def put(
         self,
@@ -260,8 +269,8 @@ class ProposalStore:
         to stop asking the model for another name and fall back instead.
         """
         key = (user_key, fingerprint)
-        count = self._naming_attempts.get(key, 0) + 1
-        self._naming_attempts[key] = count
+        count = self._naming_attempts.get(key, (0, 0.0))[0] + 1
+        self._naming_attempts[key] = (count, self._clock())
         return count
 
     def clear_naming_attempts(self, user_key: str, fingerprint: str) -> None:
@@ -273,6 +282,39 @@ class ProposalStore:
         loop from zero rather than inheriting a stale count.
         """
         self._naming_attempts.pop((user_key, fingerprint), None)
+
+    def claim(self, proposal: Proposal) -> bool:
+        """Atomically mark `proposal` as currently being confirmed.
+
+        The caller must call this synchronously, with no `await` between its
+        own `consumed` check and this call — that absence of an `await` is
+        what makes the combination race-free on asyncio's single-threaded
+        event loop: nothing else can run between "not consumed" and "now
+        claimed". Without this, two overlapping confirms of the same
+        `proposalId` (a client-side retry landing while the first attempt is
+        still awaiting its upstream `create`/`update`/`delete` call) could
+        both pass the `consumed` check before either one finishes, and both
+        would execute the write. Returns `False` if a confirm is already in
+        flight for this proposal, so the caller can refuse the second one
+        instead of racing it.
+        """
+        if proposal.claimed:
+            return False
+        proposal.claimed = True
+        return True
+
+    def release(self, proposal: Proposal) -> None:
+        """Undo `claim` after a confirm attempt ends without consuming the proposal.
+
+        Called on every non-`mark_consumed` exit from a claimed confirm --
+        a live re-check refusing the write (`name_exists`,
+        `criteria_already_saved`, ...) or the upstream call itself failing.
+        Without this, that proposal would report `proposal_in_progress`
+        forever, even though nothing is actually in flight, and a
+        legitimate retry (e.g. after the caller fixes the name) would have
+        no way to proceed.
+        """
+        proposal.claimed = False
 
     def mark_consumed(self, proposal: Proposal, *, result: dict[str, Any] | None = None) -> None:
         """Flip a proposal to consumed after `save_search` / `delete_saved_search` executes it.
@@ -306,6 +348,20 @@ class ProposalStore:
         for proposal in list(self._by_id.values()):
             if self._expired(proposal):
                 self._forget(proposal)
+
+        if self._naming_attempts:
+            # Guarded on non-empty: an extra unconditional `self._clock()`
+            # call here would consume a tick from every test (and every
+            # real caller) that injects a fixed clock sequence for
+            # proposal-TTL assertions alone and never touches naming at all.
+            now = self._clock()
+            expired_naming_keys = [
+                key
+                for key, (_, last_failure_at) in self._naming_attempts.items()
+                if (now - last_failure_at) > self._ttl_seconds
+            ]
+            for key in expired_naming_keys:
+                del self._naming_attempts[key]
 
 
 __all__ = ["Proposal", "ProposalAction", "ProposalStore", "user_key_from_token"]

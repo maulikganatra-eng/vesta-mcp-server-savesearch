@@ -37,4 +37,17 @@ async def request_or_upstream_error(
         raise SavedSearchUpstreamError(f"{description} failed: {exc}") from exc
 
 
-__all__ = ["request_or_upstream_error"]
+def upstream_error_for_status(description: str, response: httpx.Response) -> SavedSearchUpstreamError:
+    """Build a `SavedSearchUpstreamError` for an unexpected status code on a real response.
+
+    Only the "echo back a bit of the body" truncation is shared here — the
+    two clients' interpretation of WHICH status codes mean what stays with
+    each caller (see `request_or_upstream_error`'s docstring), but both were
+    independently truncating to the same 200 characters, which is exactly
+    the kind of detail that drifts unnoticed if one client's copy is ever
+    tweaked and the other's is not.
+    """
+    return SavedSearchUpstreamError(f"{description}: {response.text[:200]}")
+
+
+__all__ = ["request_or_upstream_error", "upstream_error_for_status"]

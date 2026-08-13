@@ -200,7 +200,30 @@ def fallback_name(
     return candidate[:max_length]
 
 
+def dedupe_fallback_name(name: str, records: list[SavedSearchRecord], *, max_length: int) -> str:
+    """Disambiguate `name` against `records` by appending a numeric suffix.
+
+    Only reached after two regeneration attempts already failed and
+    `fallback_name` produced the guaranteed, deterministic exit -- if even
+    that name collides with something already saved (two structurally
+    different searches can produce the same `criteriaSummary`-derived
+    fallback), append the smallest ` (N)` suffix that clears the collision
+    now, at propose time, instead of returning `status: ready` with a name
+    that would only fail later, at confirm time, as `name_exists`.
+    """
+    if find_by_name(records, name) is None:
+        return name
+    suffix_n = 2
+    while True:
+        suffix = f" ({suffix_n})"
+        candidate = name[: max_length - len(suffix)] + suffix
+        if find_by_name(records, candidate) is None:
+            return candidate
+        suffix_n += 1
+
+
 __all__ = [
+    "dedupe_fallback_name",
     "fallback_name",
     "find_by_fingerprint",
     "find_by_name",

@@ -17,12 +17,13 @@ from pydantic import BaseModel, Field, model_validator
 from vesta_saved_search.client import SavedSearchClient
 from vesta_saved_search.config import PROPERTY_SEARCH_INTERNAL_URL, SAVED_SEARCH_NAME_MAX_LENGTH
 from vesta_saved_search.errors import SavedSearchApiError, SavedSearchNameExistsError
-from vesta_saved_search.es_query_client import EsQueryClient
+from vesta_saved_search.es_query_client import EsQueryClient, search_mode_for_es_query
 from vesta_saved_search.fingerprint import criteria_fingerprint
 from vesta_saved_search.frequency import frequency_to_schedule_interval
 from vesta_saved_search.identity import bearer_token_from_meta
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.naming import (
+    dedupe_fallback_name,
     fallback_name,
     find_by_fingerprint,
     find_by_name,
@@ -182,6 +183,77 @@ def _record_to_dict(record: SavedSearchRecord) -> dict[str, Any]:
     }
 
 
+def _settle_generated_name(
+    store: ProposalStore,
+    user_key: str,
+    fingerprint: str,
+    *,
+    candidate_name: str,
+    name_was_generated: bool,
+    criteria_summary: str,
+    unsupported_filters: list[str],
+    collision_records: list[SavedSearchRecord],
+    all_records: list[SavedSearchRecord],
+    user_stated_collision_status: str,
+) -> dict[str, Any] | tuple[str, int]:
+    """Resolve `candidate_name` to `(final_name, regeneration_attempts)`, or an
+    envelope body the caller should return immediately.
+
+    The name-collision / length / unsupported-filter / regeneration /
+    deterministic-fallback state machine shared by `propose_saved_search`'s
+    create path and `_propose_update`'s rename path — kept in one place so
+    the two cannot drift on it independently, and so a rename gets the exact
+    same `mentions_unsupported_filter` protection a create already had (a
+    generated rename can reference a filter the search does not actually
+    apply, same as a generated create name could). Only what happens on a
+    user-STATED collision differs between the two callers
+    (`name_conflict_create_only` vs `name_exists`), supplied via
+    `user_stated_collision_status`.
+
+    The deterministic fallback is re-checked against `collision_records`
+    too (`dedupe_fallback_name`) — two structurally different searches can
+    share the same `criteriaSummary`-derived fallback, and a collision
+    caught here at propose time is cheaper than one first discovered at
+    confirm time as `name_exists`.
+    """
+    name_collision = find_by_name(collision_records, candidate_name)
+    too_long = len(candidate_name) > SAVED_SEARCH_NAME_MAX_LENGTH
+
+    if name_collision is not None:
+        if not name_was_generated:
+            return {"status": user_stated_collision_status, "existingName": name_collision.name}
+        reason = "name_collision"
+    elif too_long:
+        if not name_was_generated:
+            return {
+                "status": "invalid",
+                "message": f"name exceeds {SAVED_SEARCH_NAME_MAX_LENGTH} characters",
+            }
+        reason = "name_too_long"
+    elif name_was_generated and mentions_unsupported_filter(candidate_name, unsupported_filters):
+        reason = "mentions_unsupported_filter"
+    else:
+        return candidate_name, 0
+
+    attempts = store.note_naming_failure(user_key, fingerprint)
+    if attempts < 2:
+        return {
+            "status": "name_needs_regeneration",
+            "reason": reason,
+            "takenNames": [record.name for record in all_records],
+        }
+
+    fallback = fallback_name(
+        criteria_summary,
+        max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+        unsupported_filters=unsupported_filters,
+    )
+    final_name = dedupe_fallback_name(
+        fallback, collision_records, max_length=SAVED_SEARCH_NAME_MAX_LENGTH
+    )
+    return final_name, attempts
+
+
 def register_tools(
     app: FastMCP,
     client: SavedSearchClient,
@@ -261,6 +333,30 @@ def register_tools(
         current_fingerprint = criteria_fingerprint(current.search_filters, current.search_mode)
         criteria_changed = new_fingerprint != current_fingerprint
 
+        if not criteria_changed:
+            try:
+                # Fail fast, at PROPOSE time, but ONLY when criteria is
+                # unchanged: `apply_update`'s step 4 maps `current.search_mode`
+                # via `search_mode_for_es_query` ONLY on that path (a criteria
+                # change instead uses the caller-supplied `fresh_es_query`
+                # directly and never touches this mapping at all) -- so a
+                # rename or frequency-only change on a record with an
+                # unmappable stored `searchType` would otherwise be blocked
+                # forever, while a criteria change on that same record would
+                # succeed. Checking here means the model gets a clear,
+                # specific reason immediately for the case that actually
+                # needs it, instead of a generic upstream `error` only after
+                # the user has already confirmed a proposal that could never
+                # have succeeded.
+                search_mode_for_es_query(current.search_mode)
+            except SavedSearchApiError as exc:
+                return {
+                    _ENVELOPE_KEY: {
+                        "status": "invalid",
+                        "message": f"cannot update this saved search: {exc}",
+                    }
+                }
+
         if criteria_changed:
             # Precedence matches N5's create path: criteria before name.
             duplicate = find_by_fingerprint(others, new_fingerprint)
@@ -285,55 +381,21 @@ def register_tools(
         regeneration_attempts = 0
 
         if name_changed:
-            name_collision = find_by_name(others, params.name)
-            if name_collision is not None:
-                if not params.nameWasGenerated:
-                    # Same 2x2 as the create path: a user-STATED collision
-                    # always reaches the user; a GENERATED one never does.
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "name_exists",
-                            "existingName": name_collision.name,
-                        }
-                    }
-                regeneration_attempts = store.note_naming_failure(user_key, update_fingerprint)
-                if regeneration_attempts < 2:
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "name_needs_regeneration",
-                            "reason": "name_collision",
-                            "takenNames": [record.name for record in existing],
-                        }
-                    }
-                final_name = fallback_name(
-                    params.criteriaSummary,
-                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
-                    unsupported_filters=params.unsupportedFilters,
-                )
-            elif len(params.name) > SAVED_SEARCH_NAME_MAX_LENGTH:
-                if not params.nameWasGenerated:
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "invalid",
-                            "message": f"name exceeds {SAVED_SEARCH_NAME_MAX_LENGTH} characters",
-                        }
-                    }
-                regeneration_attempts = store.note_naming_failure(user_key, update_fingerprint)
-                if regeneration_attempts < 2:
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "name_needs_regeneration",
-                            "reason": "name_too_long",
-                            "takenNames": [record.name for record in existing],
-                        }
-                    }
-                final_name = fallback_name(
-                    params.criteriaSummary,
-                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
-                    unsupported_filters=params.unsupportedFilters,
-                )
-            else:
-                final_name = params.name
+            settled = _settle_generated_name(
+                store,
+                user_key,
+                update_fingerprint,
+                candidate_name=params.name,
+                name_was_generated=params.nameWasGenerated,
+                criteria_summary=params.criteriaSummary,
+                unsupported_filters=params.unsupportedFilters,
+                collision_records=others,
+                all_records=existing,
+                user_stated_collision_status="name_exists",
+            )
+            if isinstance(settled, dict):
+                return {_ENVELOPE_KEY: settled}
+            final_name, regeneration_attempts = settled
 
         store.clear_naming_attempts(user_key, update_fingerprint)
 
@@ -542,81 +604,23 @@ def register_tools(
                 }
             }
 
-        final_name = params.name
-        regeneration_attempts = 0
-        used_fallback = False
-
-        name_collision = find_by_name(existing, params.name)
-        if name_collision is not None:
-            if not params.nameWasGenerated:
-                # Same input (a name collision), opposite outcomes depending
-                # on nameWasGenerated -- a generated collision never reaches
-                # the user; a user-STATED collision always does.
-                if params.intent == "create_new":
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "name_conflict_create_only",
-                            "existingName": name_collision.name,
-                        }
-                    }
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "name_exists",
-                        "existingName": name_collision.name,
-                    }
-                }
-
-            regeneration_attempts = store.note_naming_failure(user_key, fingerprint)
-            if regeneration_attempts < 2:
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "name_needs_regeneration",
-                        "reason": "name_collision",
-                        "takenNames": [record.name for record in existing],
-                    }
-                }
-            final_name = fallback_name(
-                params.criteriaSummary,
-                max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
-                unsupported_filters=params.unsupportedFilters,
-            )
-            used_fallback = True
-
-        if params.nameWasGenerated and not used_fallback:
-            # 🔴 The highest-value naming check: a generated name is never
-            # allowed to mention something this search cannot actually
-            # filter on. Checked pre-fallback too -- `fallback_name` itself
-            # also strips any word shared with `unsupportedFilters`, so the
-            # guarantee holds for both paths, not just the one below.
-            too_long = len(final_name) > SAVED_SEARCH_NAME_MAX_LENGTH
-            if too_long or mentions_unsupported_filter(final_name, params.unsupportedFilters):
-                regeneration_attempts = store.note_naming_failure(user_key, fingerprint)
-                if regeneration_attempts < 2:
-                    reason = "name_too_long" if too_long else "mentions_unsupported_filter"
-                    return {
-                        _ENVELOPE_KEY: {
-                            "status": "name_needs_regeneration",
-                            "reason": reason,
-                            "takenNames": [record.name for record in existing],
-                        }
-                    }
-                final_name = fallback_name(
-                    params.criteriaSummary,
-                    max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
-                    unsupported_filters=params.unsupportedFilters,
-                )
-                used_fallback = True
-
-        if not params.nameWasGenerated and len(final_name) > SAVED_SEARCH_NAME_MAX_LENGTH:
-            # A user-stated name is used verbatim, never "improved" -- an
-            # over-length one is refused outright rather than silently
-            # regenerated into something the user did not ask for.
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": f"name exceeds {SAVED_SEARCH_NAME_MAX_LENGTH} characters",
-                }
-            }
+        settled = _settle_generated_name(
+            store,
+            user_key,
+            fingerprint,
+            candidate_name=params.name,
+            name_was_generated=params.nameWasGenerated,
+            criteria_summary=params.criteriaSummary,
+            unsupported_filters=params.unsupportedFilters,
+            collision_records=existing,
+            all_records=existing,
+            user_stated_collision_status=(
+                "name_conflict_create_only" if params.intent == "create_new" else "name_exists"
+            ),
+        )
+        if isinstance(settled, dict):
+            return {_ENVELOPE_KEY: settled}
+        final_name, regeneration_attempts = settled
 
         store.clear_naming_attempts(user_key, fingerprint)
 
@@ -673,14 +677,23 @@ def register_tools(
         """The confirm-guard sequence shared by `save_search` and `delete_saved_search`.
 
         Returns either an envelope dict the caller should return immediately
-        (not confirmed, unknown/expired/foreign id, action mismatch, or a
-        replay of an already-consumed proposal), or the validated
+        (not confirmed, unknown/expired/foreign id, action mismatch, a
+        replay of an already-consumed proposal, or a confirm already in
+        flight for this exact proposal), or the validated, now-CLAIMED
         `Proposal` to proceed with. Factored out so the two writers cannot
         drift on this sequence independently — they already had (and keep,
         deliberately) one real difference, `already_done_status`
         (`already_saved` vs `already_deleted`), and the next propose/confirm
         verb would otherwise need a third hand-copied version with no
         guardrail against getting a step wrong or out of order.
+
+        🔴 The `consumed` check and the `store.claim()` call below run with
+        no `await` between them, which is what makes them race-free -- see
+        `ProposalStore.claim`'s docstring. A caller that gets back a
+        `Proposal` from this function MUST eventually call either
+        `store.mark_consumed` (on success) or `store.release` (on any other
+        return) — see `save_search` / `delete_saved_search`'s `try/finally`
+        around this call.
         """
         if confirmed is not True:
             return {_ENVELOPE_KEY: {"status": "not_confirmed"}}
@@ -702,6 +715,11 @@ def register_tools(
             # so a crashed client retrying its own successful request sees
             # the same outcome it already got.
             return {_ENVELOPE_KEY: {"status": already_done_status, **(proposal.result or {})}}
+
+        if not store.claim(proposal):
+            # Another confirm of this exact proposalId is still executing
+            # its upstream call -- refuse this one rather than racing it.
+            return {_ENVELOPE_KEY: {"status": "proposal_in_progress"}}
 
         return proposal
 
@@ -739,59 +757,67 @@ def register_tools(
             return resolved
         proposal = resolved
 
-        if proposal.action == "update":
-            return await _confirm_update(proposal, token)
-
         try:
-            existing = await client.list_saved_searches(token)
-        except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            if proposal.action == "update":
+                return await _confirm_update(proposal, token)
 
-        duplicate = find_by_fingerprint(existing, proposal.fingerprint)
-        if duplicate is not None:
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "criteria_already_saved",
-                    "existingName": duplicate.name,
+            try:
+                existing = await client.list_saved_searches(token)
+            except SavedSearchApiError as exc:
+                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+
+            duplicate = find_by_fingerprint(existing, proposal.fingerprint)
+            if duplicate is not None:
+                return {
+                    _ENVELOPE_KEY: {
+                        "status": "criteria_already_saved",
+                        "existingName": duplicate.name,
+                    }
                 }
-            }
 
-        name_collision = find_by_name(existing, proposal.name)
-        if name_collision is not None:
-            return {_ENVELOPE_KEY: {"status": "name_exists", "existingName": name_collision.name}}
+            name_collision = find_by_name(existing, proposal.name)
+            if name_collision is not None:
+                return {_ENVELOPE_KEY: {"status": "name_exists", "existingName": name_collision.name}}
 
-        payload = proposal.payload
-        if not url_matches_filters(payload["search_url"], payload["search_filters"]):
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": "searchUrl no longer matches searchFilters",
+            payload = proposal.payload
+            if not url_matches_filters(payload["search_url"], payload["search_filters"]):
+                return {
+                    _ENVELOPE_KEY: {
+                        "status": "invalid",
+                        "message": "searchUrl no longer matches searchFilters",
+                    }
                 }
-            }
 
-        try:
-            record = await client.create(
-                token,
-                name=proposal.name,
-                search_filters=payload["search_filters"],
-                search_url=payload["search_url"],
-                es_query=payload["es_query"],
-                notification_frequency=payload["notification_frequency"],
-            )
-        except SavedSearchNameExistsError:
-            # The free backstop: verified to key on name only, so this can
-            # fire even if our own client-side check above somehow missed
-            # it. Mapped to the same clean message rather than a raw 400.
-            return {_ENVELOPE_KEY: {"status": "name_exists"}}
-        except SavedSearchApiError as exc:
-            # Never a success status for an upstream failure -- a bare
-            # exception here would otherwise crash the tool call instead of
-            # answering "couldn't save right now".
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            try:
+                record = await client.create(
+                    token,
+                    name=proposal.name,
+                    search_filters=payload["search_filters"],
+                    search_url=payload["search_url"],
+                    es_query=payload["es_query"],
+                    notification_frequency=payload["notification_frequency"],
+                )
+            except SavedSearchNameExistsError:
+                # The free backstop: verified to key on name only, so this can
+                # fire even if our own client-side check above somehow missed
+                # it. Mapped to the same clean message rather than a raw 400.
+                return {_ENVELOPE_KEY: {"status": "name_exists"}}
+            except SavedSearchApiError as exc:
+                # Never a success status for an upstream failure -- a bare
+                # exception here would otherwise crash the tool call instead of
+                # answering "couldn't save right now".
+                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
 
-        result = _record_to_dict(record)
-        store.mark_consumed(proposal, result=result)
-        return {_ENVELOPE_KEY: {"status": "ok", **result}}
+            result = _record_to_dict(record)
+            store.mark_consumed(proposal, result=result)
+            return {_ENVELOPE_KEY: {"status": "ok", **result}}
+        finally:
+            # Every return above except the `mark_consumed` one falls
+            # through to here with `proposal.consumed` still `False` --
+            # release the claim so a legitimate retry (fix the name, try
+            # again) is not permanently stuck reporting `proposal_in_progress`.
+            if not proposal.consumed:
+                store.release(proposal)
 
     @app.tool(name="update_saved_search_notifications")
     async def update_saved_search_notifications(
@@ -828,6 +854,21 @@ def register_tools(
                 _ENVELOPE_KEY: {
                     "status": "invalid",
                     "message": f"no saved search with id {params.savedSearchId}",
+                }
+            }
+
+        try:
+            # A frequency-only change never touches criteria, so
+            # `apply_update`'s step 4 always maps `current.search_mode` for
+            # this path (never the caller-supplied `fresh_es_query` branch)
+            # -- see `_propose_update`'s identical check for why this must
+            # fail fast, at propose time, rather than only at confirm.
+            search_mode_for_es_query(current.search_mode)
+        except SavedSearchApiError as exc:
+            return {
+                _ENVELOPE_KEY: {
+                    "status": "invalid",
+                    "message": f"cannot update this saved search: {exc}",
                 }
             }
 
@@ -929,15 +970,19 @@ def register_tools(
             return resolved
         stashed_proposal = resolved
 
-        saved_search_id = stashed_proposal.payload["saved_search_id"]
         try:
-            await client.delete(token, saved_search_id)
-        except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            saved_search_id = stashed_proposal.payload["saved_search_id"]
+            try:
+                await client.delete(token, saved_search_id)
+            except SavedSearchApiError as exc:
+                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
 
-        result = {"savedSearchId": saved_search_id}
-        store.mark_consumed(stashed_proposal, result=result)
-        return {_ENVELOPE_KEY: {"status": "ok", **result}}
+            result = {"savedSearchId": saved_search_id}
+            store.mark_consumed(stashed_proposal, result=result)
+            return {_ENVELOPE_KEY: {"status": "ok", **result}}
+        finally:
+            if not stashed_proposal.consumed:
+                store.release(stashed_proposal)
 
 
 __all__ = ["register_tools"]
