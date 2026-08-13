@@ -61,10 +61,8 @@ USER app
 # side by side. See the capability plan's two-server split.
 EXPOSE 6001
 
-# Points at the FastMCP app that step N1 creates. Until N1 lands, `docker build`
-# succeeds and `docker run` exits immediately with ModuleNotFoundError — this is
-# scaffolding, and CI's docker job deliberately builds the image without running
-# it. There is no HEALTHCHECK yet for the same reason: N1 adds the /health route
-# it would call, and a HEALTHCHECK against a route that does not exist would
-# report every container as unhealthy rather than catching anything.
+# Points at the FastMCP app N1 added. No HEALTHCHECK instruction here --
+# both docker-compose.yml and docker-compose.local.yml define one against
+# the real `/health` route N1 also added, matching the property-search
+# repo's own pattern of keeping the healthcheck in compose rather than here.
 CMD ["python", "-m", "vesta_saved_search.server"]

@@ -1,0 +1,26 @@
+services:
+  saved-search-mcp-server:
+    build: .
+    image: vesta-mcp-server-savesearch
+    container_name: vesta-mcp-server-savesearch
+    ports:
+      - "6001:6001"
+    environment:
+      - MCP_TRANSPORT=${MCP_TRANSPORT}
+      - MCP_HOST=${MCP_HOST}
+      - MCP_PORT=${MCP_PORT}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - GUESTSITE_SAVED_SEARCH_BASE_URL=${GUESTSITE_SAVED_SEARCH_BASE_URL}
+      - PROPERTY_SEARCH_INTERNAL_URL=${PROPERTY_SEARCH_INTERNAL_URL}
+      - SAVED_SEARCH_PROPOSAL_TTL_SECONDS=${SAVED_SEARCH_PROPOSAL_TTL_SECONDS}
+      - SAVED_SEARCH_NAME_MAX_LENGTH=${SAVED_SEARCH_NAME_MAX_LENGTH}
+    restart: unless-stopped
+    healthcheck:
+      # /health is a plain REST route (unlike property-search's /mcp, a
+      # streamable-HTTP endpoint that answers a bare GET with a 4xx) -- a
+      # real 200 is expected here, so this checks for exactly that.
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:6001/health', timeout=5).raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,24 @@
+services:
+  saved-search-mcp-server:
+    build: .
+    ports:
+      - "6001:6001"
+    env_file:
+      - .env                        # GUESTSITE_SAVED_SEARCH_BASE_URL, PROPERTY_SEARCH_INTERNAL_URL, etc. — never commit this
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "6001"
+    # Lets this container reach a property-search server run via
+    # `docker compose -f docker-compose.local.yml up` in the sibling
+    # vesta-mcp-server repo, or the saved-search server run directly on the
+    # host -- both publish to the host's own network, not this one.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:6001/health', timeout=5).raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
