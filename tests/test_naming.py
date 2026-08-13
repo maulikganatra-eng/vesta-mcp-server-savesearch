@@ -6,6 +6,7 @@ import pytest
 
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.naming import (
+    dedupe_fallback_name,
     fallback_name,
     find_by_fingerprint,
     find_by_name,
@@ -193,3 +194,38 @@ def test_fallback_name_with_only_stopwords_in_unsupported_filters_is_unchanged()
 def test_fallback_name_that_becomes_blank_after_stripping_falls_back_to_saved_search() -> None:
     result = fallback_name("home theater", max_length=60, unsupported_filters=["home theater"])
     assert result == "Saved Search"
+
+
+def test_dedupe_fallback_name_returns_the_name_unchanged_when_no_collision() -> None:
+    records = [_record(name="Something Else")]
+    assert dedupe_fallback_name("Del Mar Search", records, max_length=60) == "Del Mar Search"
+
+
+def test_dedupe_fallback_name_appends_the_smallest_clearing_suffix() -> None:
+    """🔴 Two structurally different searches can share the same
+    criteriaSummary-derived fallback -- this is what stops that collision
+    from surfacing only at confirm time as name_exists."""
+    records = [_record(name="Del Mar Search"), _record(name="Del Mar Search (2)")]
+    result = dedupe_fallback_name("Del Mar Search", records, max_length=60)
+    assert result == "Del Mar Search (3)"
+    assert find_by_name(records, result) is None
+
+
+def test_dedupe_fallback_name_tries_suffixes_in_order() -> None:
+    records = [_record(name="X Search")]
+    assert dedupe_fallback_name("X Search", records, max_length=60) == "X Search (2)"
+
+
+def test_dedupe_fallback_name_clamps_rather_than_uses_a_negative_slice() -> None:
+    """🔴 name[:max_length - len(suffix)] goes negative (and silently slices
+    from the wrong end instead of raising) once a multi-digit suffix like
+    " (10)" would overrun a small max_length. Force ten collisions so the
+    loop actually reaches a two-digit suffix, and assert the result is a
+    real, correctly-suffixed name rather than a mangled one."""
+    records = [_record(name="AB")] + [_record(name=f"AB ({n})") for n in range(2, 10)]
+    result = dedupe_fallback_name("AB", records, max_length=6)
+    # At suffix " (10)" (5 chars), max(0, 6 - 5) == 1, so the base truncates
+    # to "A" rather than going negative and slicing from the wrong end.
+    assert result == "A (10)"
+    assert len(result) <= 6
+    assert find_by_name(records, result) is None

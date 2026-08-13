@@ -157,6 +157,27 @@ async def test_valid_request_stashes_a_ready_update_proposal_and_writes_nothing(
     assert "search_filters" not in proposal.payload["change"]
 
 
+async def test_unmappable_search_mode_is_invalid_at_propose_time() -> None:
+    """🔴 A frequency-only change always refreshes esQuery via S4, which
+    requires mapping the record's stored searchType -- unlike
+    propose_saved_search's rename path, N8 has no fingerprint gate at all,
+    so this really is reachable for any record with a corrupted/unexpected
+    stored searchType."""
+    stored = _record(search_mode="commercial")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose_notifications(
+        app,
+        UpdateSavedSearchNotificationsParams(savedSearchId=42, notificationFrequency="daily"),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result["saved_search"]["status"] == "invalid"
+    assert "cannot update" in result["saved_search"]["message"]
+    client.update.assert_not_called()
+
+
 async def test_does_not_bypass_confirmation() -> None:
     """An unconfirmed call -- i.e. this tool alone, with no save_search
     confirm afterward -- writes nothing. Asserted by construction: this tool

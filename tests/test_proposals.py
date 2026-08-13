@@ -29,6 +29,20 @@ def _clock(times: list[float]) -> Callable[[], float]:
     return clock
 
 
+class _MutableClock:
+    """A clock whose value can be bumped directly between calls, rather than
+    an iterator that requires pre-counting every tick a test path consumes --
+    convenient for tests that trigger `put()`'s opportunistic sweep as a
+    side effect and don't want to hand-count how many times it calls the
+    clock internally."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def test_user_key_is_a_hash_not_the_token_itself() -> None:
     key = user_key_from_token(TOKEN_A)
     assert key != TOKEN_A
@@ -198,3 +212,69 @@ def test_action_and_previous_name_are_stashed() -> None:
     assert proposal.action == "delete"
     assert proposal.previous_name == "Even Older Name"
     assert proposal.regeneration_attempts == 2
+
+
+def test_claim_returns_true_once_then_false_while_claimed() -> None:
+    """🔴 The exact mechanism that closes the double-confirm race: a second
+    `claim()` on the same proposal while the first is still in flight must
+    be refused, not silently allowed to proceed alongside it."""
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN_A)
+    proposal = store.put(user_key, action="save", payload={}, name="X", fingerprint="fp")
+
+    assert store.claim(proposal) is True
+    assert store.claim(proposal) is False
+
+
+def test_release_allows_a_subsequent_claim() -> None:
+    """A legitimate retry (e.g. after the caller fixes a name collision)
+    must not be permanently stuck behind a claim from an attempt that
+    already gave up."""
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN_A)
+    proposal = store.put(user_key, action="save", payload={}, name="X", fingerprint="fp")
+
+    assert store.claim(proposal) is True
+    store.release(proposal)
+    assert store.claim(proposal) is True
+
+
+def test_new_proposal_starts_unclaimed() -> None:
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN_A)
+    proposal = store.put(user_key, action="save", payload={}, name="X", fingerprint="fp")
+    assert proposal.claimed is False
+
+
+def test_abandoned_naming_attempts_are_swept_after_ttl() -> None:
+    """🔴 An abandoned naming-regeneration loop (the model never resolves a
+    collision and the user moves on) must not leak forever -- only a loop
+    that keeps failing WITHIN one TTL window is entitled to keep its count."""
+    clock = _MutableClock(0.0)
+    store = ProposalStore(ttl_seconds=10.0, clock=clock)
+    key_a = user_key_from_token(TOKEN_A)
+
+    assert store.note_naming_failure(key_a, "fp1") == 1
+
+    clock.now = 100.0  # well past the TTL, and nothing else touches fp1
+    # put() for an unrelated user triggers the opportunistic sweep.
+    store.put(user_key_from_token(TOKEN_B), action="save", payload={}, name="Y", fingerprint="fp2")
+
+    assert store.note_naming_failure(key_a, "fp1") == 1  # restarted, not 2
+
+
+def test_active_naming_loop_survives_a_sweep_within_ttl() -> None:
+    """The counterpart to the eviction test: a loop that is still actively
+    failing must NOT be swept just because some time has passed, or a slow
+    (but ongoing) naming negotiation could let an unsupported-filter name
+    slip through on a retry that should have gone to the fallback."""
+    clock = _MutableClock(0.0)
+    store = ProposalStore(ttl_seconds=10.0, clock=clock)
+    key_a = user_key_from_token(TOKEN_A)
+
+    assert store.note_naming_failure(key_a, "fp1") == 1
+
+    clock.now = 5.0  # within the TTL window
+    store.put(user_key_from_token(TOKEN_B), action="save", payload={}, name="Y", fingerprint="fp2")
+
+    assert store.note_naming_failure(key_a, "fp1") == 2  # not reset

@@ -339,3 +339,23 @@ async def test_resending_display_cased_frequency_during_a_pure_rename_is_not_a_c
     assert proposal is not None
     assert "notification_frequency" not in proposal.payload["change"]
     assert proposal.payload["change"]["name"] == "New Name"
+
+
+async def test_unmappable_search_mode_does_not_block_a_criteria_change() -> None:
+    """The unmappable-searchType guard only applies when criteria is
+    unchanged -- a criteria change supplies its own fresh esQuery and never
+    touches search_mode_for_es_query at all."""
+    stored = _record(saved_search_id=42, search_mode="commercial")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        _params(
+            searchFilters={"city": "Malibu"},
+            searchUrl="explore/listings/saved-search/42/for-sale?city=Malibu",
+        ),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result["saved_search"]["status"] == "ready"

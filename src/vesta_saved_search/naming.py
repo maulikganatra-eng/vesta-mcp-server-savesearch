@@ -216,7 +216,11 @@ def dedupe_fallback_name(name: str, records: list[SavedSearchRecord], *, max_len
     suffix_n = 2
     while True:
         suffix = f" ({suffix_n})"
-        candidate = name[: max_length - len(suffix)] + suffix
+        # 🔴 Clamped to 0 -- a negative slice index doesn't raise, it slices
+        # from the wrong end, silently producing a confusing (but
+        # non-crashing) name if `max_length` is ever configured small
+        # enough that a multi-digit suffix (e.g. " (10)") would overrun it.
+        candidate = name[: max(0, max_length - len(suffix))] + suffix
         if find_by_name(records, candidate) is None:
             return candidate
         suffix_n += 1

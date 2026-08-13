@@ -348,8 +348,22 @@ def register_tools(
                 # needs it, instead of a generic upstream `error` only after
                 # the user has already confirmed a proposal that could never
                 # have succeeded.
+                #
+                # Provably unreachable via THIS function today, and kept
+                # anyway: `criteria_fingerprint` bakes `search_mode` into the
+                # hash it compares, casefolded — so `criteria_changed` being
+                # `False` already guarantees `current.search_mode` casefolds
+                # to one of `params.searchMode`'s three valid literals, which
+                # are exactly the three `search_mode_for_es_query` maps. This
+                # guard is defensive against that fingerprint relationship
+                # ever changing, and it keeps this branch symmetric with
+                # `update_saved_search_notifications`'s identical check
+                # below, which genuinely IS reachable — that tool has no
+                # fingerprint gate at all, so a corrupted stored `searchType`
+                # reaches it directly. See that tool's test for the real
+                # coverage of this exact failure mode.
                 search_mode_for_es_query(current.search_mode)
-            except SavedSearchApiError as exc:
+            except SavedSearchApiError as exc:  # pragma: no cover
                 return {
                     _ENVELOPE_KEY: {
                         "status": "invalid",

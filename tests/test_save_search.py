@@ -9,6 +9,7 @@ over a real MCP session.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -323,6 +324,65 @@ async def test_upstream_5xx_never_produces_a_success_status() -> None:
     )
 
     assert result["saved_search"]["status"] == "error"
+
+
+async def test_concurrent_confirms_of_the_same_proposal_write_exactly_once() -> None:
+    """🔴 The exact race `ProposalStore.claim()`/`release()` exists to close:
+    two overlapping confirms of the same `proposalId` (a client-side retry
+    landing while the first attempt is still awaiting its upstream call)
+    must produce exactly one write, one `ok`, and one `proposal_in_progress`
+    -- never two writes.
+
+    Forces the interleaving explicitly (create_task + a controlled
+    `asyncio.Event`, rather than a bare `asyncio.gather`) so this test does
+    not depend on implicit scheduling order to actually exercise the race:
+    task 1 is driven up to the exact point where it is blocked inside its
+    upstream `client.create` call before task 2 is ever started.
+    """
+    release_upstream = asyncio.Event()
+
+    async def _slow_create(*args: Any, **kwargs: Any) -> SavedSearchRecord:
+        await release_upstream.wait()
+        return _record(saved_search_id=99, name="Del Mar Homes")
+
+    client = _client([])
+    client.create.side_effect = _slow_create
+    store = ProposalStore()
+    proposal_id = _stash_ready_proposal(store)
+    app = _app_with(client, store)
+
+    params = SaveSearchParams(proposalId=proposal_id, confirmed=True)
+    task1 = asyncio.create_task(_save(app, params, _FakeCtx(TOKEN_A)))
+    await asyncio.sleep(0)  # let task 1 run until it blocks inside client.create
+
+    result2 = await _save(app, params, _FakeCtx(TOKEN_A))
+    assert result2["saved_search"]["status"] == "proposal_in_progress"
+
+    release_upstream.set()
+    result1 = await task1
+
+    assert result1["saved_search"]["status"] == "ok"
+    client.create.assert_awaited_once()
+
+
+async def test_a_released_claim_allows_a_legitimate_retry() -> None:
+    """After a confirm attempt fails a live re-check (not the upstream call
+    itself), the claim must be released -- a retry must not be permanently
+    stuck reporting proposal_in_progress."""
+    existing = _record(name="Del Mar Homes", search_filters={"city": "Someplace Else"})
+    client = _client([existing])
+    store = ProposalStore()
+    proposal_id = _stash_ready_proposal(store, name="Del Mar Homes")
+    app = _app_with(client, store)
+
+    first = await _save(app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A))
+    assert first["saved_search"]["status"] == "name_exists"
+
+    second = await _save(
+        app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
+    )
+    assert second["saved_search"]["status"] == "name_exists"
+    client.create.assert_not_called()
 
 
 async def test_envelope_has_exactly_one_top_level_key_on_every_branch() -> None:
