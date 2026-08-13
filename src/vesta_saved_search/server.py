@@ -28,7 +28,9 @@ from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
 from vesta_saved_search.client import SavedSearchClient
-from vesta_saved_search.config import GUESTSITE_SAVED_SEARCH_BASE_URL
+from vesta_saved_search.config import GUESTSITE_SAVED_SEARCH_BASE_URL, PROPERTY_SEARCH_INTERNAL_URL
+from vesta_saved_search.es_query_client import EsQueryClient
+from vesta_saved_search.proposals import ProposalStore
 from vesta_saved_search.tools import register_tools
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only, for type checking
@@ -56,7 +58,12 @@ DEFAULT_TRANSPORT = "streamable-http"
 _Transport = Literal["stdio", "sse", "streamable-http"]
 
 
-def create_app(*, saved_search_client: SavedSearchClient | None = None) -> FastMCP:
+def create_app(
+    *,
+    saved_search_client: SavedSearchClient | None = None,
+    proposal_store: ProposalStore | None = None,
+    es_query_client: EsQueryClient | None = None,
+) -> FastMCP:
     """Build a fresh :class:`FastMCP` app with the ``/health`` route and every tool
     this server exposes registered.
 
@@ -71,6 +78,20 @@ def create_app(*, saved_search_client: SavedSearchClient | None = None) -> FastM
     ``httpx.MockTransport`` instead of a real client that would try to reach the
     live GuestSite API. Production code never passes it — the default builds a real
     client against :data:`vesta_saved_search.config.GUESTSITE_SAVED_SEARCH_BASE_URL`.
+
+    ``proposal_store`` is accepted for the same reason: production leaves it
+    ``None`` and gets a fresh, per-process :class:`~vesta_saved_search.proposals.ProposalStore`
+    (see that class's docstring for why it must never be a module-level
+    global). Tests pass one explicitly to control its clock or TTL directly —
+    e.g. to force expiry deterministically, or to share one store across two
+    simulated sessions the way a pooled orchestrator connection would.
+
+    ``es_query_client`` (step N7 / VA-404) follows the same pattern again:
+    production leaves it ``None`` and gets a real
+    :class:`~vesta_saved_search.es_query_client.EsQueryClient` pointed at
+    :data:`vesta_saved_search.config.PROPERTY_SEARCH_INTERNAL_URL` — the
+    property-search server's wire-level esQuery endpoint. Tests pass one
+    built on ``httpx.MockTransport``.
     """
     host = os.getenv("MCP_HOST", DEFAULT_HOST)
     port = _port_from_env()
@@ -78,7 +99,8 @@ def create_app(*, saved_search_client: SavedSearchClient | None = None) -> FastM
     app = FastMCP(SERVER_NAME, host=host, port=port)
 
     client = saved_search_client or SavedSearchClient(GUESTSITE_SAVED_SEARCH_BASE_URL)
-    register_tools(app, client)
+    es_client = es_query_client or EsQueryClient(PROPERTY_SEARCH_INTERNAL_URL)
+    register_tools(app, client, proposal_store=proposal_store, es_query_client=es_client)
 
     # `type: ignore[untyped-decorator]` — `custom_route` comes from the MCP SDK, which
     # this repo exempts from import typing (see the mypy override for `mcp.*`), so mypy

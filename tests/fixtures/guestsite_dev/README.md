@@ -23,23 +23,28 @@ deletes them again at the end — re-running it is safe and produces a fresh set
 | `list_after_creates.json` | List reflecting both new records. |
 | `list_pagesize_200.json` | `PageSize=200` accepted and honoured — same 8 records as the default call, because this account has fewer than 15. **Does not confirm true multi-page walking**; see the caveat below. |
 | `update_rename_omit_schedule.json` | 🔴 Two unplanned, real confirmations in one call: (a) renaming while omitting `scheduleInterval` reset a Daily record's `scheduleId` from `3` to `null` — the full-replace trap, live on dev, not just sprint as the build plan states; (b) sending the plain create-shaped `searchUrl` on update stored the **literal string** `{SavedSearchId}` verbatim rather than substituting the real id — also previously verified only on sprint. |
+| `create_daily_request.json` | The **request** body that produced `create_daily.json`'s stored record (N4's golden fingerprint test needs both sides). Hand-copied from the recorder script since it only persisted responses when this was recorded — see the file's own `_note`. |
 | `list_after_rename.json` | The renamed record as read back, confirming both traps above persist on a subsequent read. |
 
-## What this account could NOT prove
+## What this account could NOT prove -- and how that gap was closed
 
-This dev account holds only 8 saved searches (before this script's two temporary
-additions). `PageSize=200` and the default call returned an identical, single,
-un-truncated page — there was never a second page to observe. So:
+This dev account held only 8 saved searches when these fixtures were recorded
+(before this script's two temporary additions). `PageSize=200` and the default
+call returned an identical, single, un-truncated page — there was never a
+second page to observe from these *recorded* fixtures alone. So:
 
 - The **true pagination-truncation trap** (`PageSize` defaulting to 15) is
-  confirmed as a documented API behaviour but not reproduced against real data
-  here.
-- The **parameter name for requesting page 2** has never been observed against
-  this API by anyone, in this repo or in `scratch/adhoc/` in the orchestrator
-  repo. `client.py`'s `_PAGE_NUMBER_PARAM = "PageNumber"` is a reasonable guess
-  (the conventional pairing with `PageSize`), not a verified fact.
+  confirmed as a documented API behaviour but was not reproduced against real
+  data by anything in this directory.
+- The **parameter name for requesting page 2** was not observed against this
+  API by anything in this directory.
 
-Both are resolved by the two-account test data already tracked as a dependency on
-**VA-402** — one account must permanently hold more than fifteen records. Confirm
-the real paging parameter against it before this client's page-walking path ever
-runs against more than one page of production data.
+✅ **Both are now resolved**, not by permanent >15-record test account data
+(the dependency once tracked on VA-402), but by
+`tests/test_contract_saved_search.py` creating and cleaning up its own
+throwaway records on every run: it forces a small `page_size`, crosses 15
+total records, and confirms `client.py`'s `_PAGE_NUMBER_PARAM = "PageNumber"`
+walks correctly with no duplicate ids and no missing records. That test is
+level 3 (`contract`, real HTTP, real writes to dev) and is not run in CI —
+run it deliberately with `uv run --frozen python scripts/tasks.py
+test-contract` when you want to re-confirm this against live dev.

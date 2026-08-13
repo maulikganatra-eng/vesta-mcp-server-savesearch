@@ -8,7 +8,7 @@ from vesta_saved_search.sensitive_keys import (
     SENSITIVE_KEY_SUBSTRINGS,
     contains_sensitive_substring,
 )
-from vesta_saved_search.tools import RECORD_FIELD_NAMES
+from vesta_saved_search.tools import PROPOSAL_FIELD_NAMES, RECORD_FIELD_NAMES
 
 pytestmark = pytest.mark.unit
 
@@ -38,6 +38,15 @@ def test_no_record_field_name_collides_with_a_sensitive_substring(field_name: st
     few to check, means a field added to `RECORD_FIELD_NAMES` later is covered by
     this test automatically.
     """
+    assert not contains_sensitive_substring(field_name), (
+        f"{field_name!r} contains a substring the orchestrator strips as sensitive "
+        "-- it would be silently deleted from the SSE payload"
+    )
+
+
+@pytest.mark.parametrize("field_name", PROPOSAL_FIELD_NAMES)
+def test_no_proposal_field_name_collides_with_a_sensitive_substring(field_name: str) -> None:
+    """Same check as above, for the fields propose_saved_search / save_search emit."""
     assert not contains_sensitive_substring(field_name), (
         f"{field_name!r} contains a substring the orchestrator strips as sensitive "
         "-- it would be silently deleted from the SSE payload"

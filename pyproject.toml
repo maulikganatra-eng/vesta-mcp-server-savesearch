@@ -73,6 +73,12 @@ dependencies = [
     # (`httpx.AsyncClient`), and it is what N2's own component tests are specified
     # against: `httpx.MockTransport` replaying recorded fixtures.
     "httpx>=0.27.0",
+    # Request-body validation for the write-flow tools (N5/N7/N8), the same
+    # pattern the property-search server's `tools.py` uses for its Filters
+    # models. Was already present transitively via `mcp`'s own dependency on
+    # pydantic; pinned here directly now that this repo's own code imports
+    # `BaseModel` rather than only relying on what the MCP SDK drags in.
+    "pydantic>=2.0",
 ]
 
 [dependency-groups]
