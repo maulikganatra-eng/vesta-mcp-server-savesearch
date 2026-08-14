@@ -21,6 +21,7 @@ import pytest
 
 from vesta_saved_search.client import SavedSearchClient
 from vesta_saved_search.errors import SavedSearchUpstreamError
+from vesta_saved_search.fingerprint import criteria_fingerprint
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.proposals import ProposalStore, user_key_from_token
 from vesta_saved_search.tools import UPDATE_SAVED_SEARCH_KEY, UpdateSavedSearchParams, register_tools
@@ -468,3 +469,200 @@ async def test_propose_omits_notification_frequency_from_response_when_unset() -
     body = result[UPDATE_SAVED_SEARCH_KEY]
     assert body["status"] == "ready"
     assert "notificationFrequency" not in body
+
+
+async def test_unknown_stored_frequency_is_invalid_not_a_crash_when_carried_forward() -> None:
+    """🔴 A record whose stored `notification_frequency` is the reachable
+    `"unknown"` state (no `(notify, scheduleId)` pair this server
+    recognises) must never reach `apply_update` -> `client.update` ->
+    `frequency_to_schedule_interval("unknown")` uncaught -- that raises a
+    bare `ValueError`, not a `SavedSearchApiError`, which would otherwise
+    crash this tool call instead of answering `invalid`. Renaming without
+    resending `notificationFrequency` carries the stored value forward."""
+    stored = _record(saved_search_id=42, name="Del Mar Homes", notification_frequency="unknown")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(
+            savedSearchId=42,
+            name="New Name",
+            nameWasGenerated=False,
+            criteriaSummary="Del Mar, for sale",
+        ),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "invalid"
+    client.update.assert_not_called()
+
+
+async def test_unknown_stored_frequency_does_not_block_a_genuine_no_change() -> None:
+    """The same corrupted-frequency guard must not preempt `no_change` -- a
+    call that changes nothing at all must resolve to `no_change`, never
+    `invalid`, even when the stored record's frequency is unmappable,
+    because nothing is actually being sent upstream."""
+    stored = _record(saved_search_id=42, name="Del Mar Homes", notification_frequency="unknown")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(savedSearchId=42, notificationFrequency="unknown"),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "invalid"
+
+
+async def test_unknown_stored_frequency_explicitly_fixed_by_the_call_succeeds() -> None:
+    """Supplying a real `notificationFrequency` on the same call that fixes
+    an `"unknown"` stored value must succeed -- the guard only fires for the
+    UNCHANGED, carried-forward value, never for one the caller is actively
+    replacing."""
+    stored = _record(saved_search_id=42, name="Del Mar Homes", notification_frequency="unknown")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(savedSearchId=42, notificationFrequency="daily"),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ready"
+
+
+async def test_rename_and_criteria_together_rejected_before_duplicate_check() -> None:
+    """The rename+criteria exclusivity guard must fire BEFORE the
+    criteria-duplicate check -- combining both in one call where the new
+    criteria also happens to collide with another of the caller's own
+    searches must report the combination problem, not `criteria_already_saved`,
+    so the caller isn't misled into thinking fixing the duplicate alone would
+    let the call through."""
+    stored = _record(saved_search_id=42, name="Del Mar Homes", search_filters={"city": "Del Mar"})
+    other = _record(
+        saved_search_id=7,
+        name="Malibu Homes",
+        search_filters={"city": "Malibu"},
+        search_url="explore/listings/saved-search/7/for-sale?city=Malibu",
+    )
+    client = _client([stored, other])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        _params(
+            name="New Name",
+            searchFilters={"city": "Malibu"},
+            searchUrl="explore/listings/saved-search/42/for-sale?city=Malibu",
+        ),
+        _FakeCtx(TOKEN),
+    )
+
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "invalid"
+    assert "one at a time" in result[UPDATE_SAVED_SEARCH_KEY]["message"]
+
+
+async def test_search_mode_alone_without_search_filters_is_rejected() -> None:
+    """`searchMode` sent without `searchFilters` used to pass validation and
+    then be silently ignored by `_propose_update` -- now the whole criteria
+    bundle is all-or-nothing, symmetric with the existing "searchFilters
+    requires the rest" check."""
+    with pytest.raises(ValueError, match="searchFilters, esQuery, searchUrl and searchMode"):
+        UpdateSavedSearchParams(
+            savedSearchId=42,
+            name="New Name",
+            nameWasGenerated=False,
+            searchMode="forRent",
+            criteriaSummary="Del Mar, for sale",
+        )
+
+
+async def test_name_was_generated_required_whenever_name_is_set() -> None:
+    """`nameWasGenerated` must be explicitly stated whenever `name` is --
+    unlike a default of `False`, an omitted flag can no longer silently be
+    read as "user-stated" (which would treat a collision on a generated
+    rename as `name_exists` instead of transparently regenerating)."""
+    with pytest.raises(ValueError, match="nameWasGenerated is required"):
+        UpdateSavedSearchParams(savedSearchId=42, name="New Name", criteriaSummary="Del Mar, for sale")
+
+
+async def test_no_change_response_includes_notification_frequency_when_requested() -> None:
+    """Every other status branch echoes back `notificationFrequency` when the
+    caller sent one -- `no_change` must too, so a caller confirming "it's
+    already Daily" doesn't need to special-case this one status."""
+    stored = _record(saved_search_id=42, notification_frequency="daily")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(savedSearchId=42, notificationFrequency="daily"),
+        _FakeCtx(TOKEN),
+    )
+
+    body = result[UPDATE_SAVED_SEARCH_KEY]
+    assert body["status"] == "no_change"
+    assert body["notificationFrequency"] == "daily"
+
+
+async def test_no_change_response_omits_notification_frequency_when_not_requested() -> None:
+    """The other half of the `no_change` echo: a no-op driven purely by
+    resending unchanged criteria, with no `notificationFrequency` on the
+    call at all, must not fabricate one in the response."""
+    stored = _record(saved_search_id=42, search_filters={"city": "Del Mar"}, search_mode="forSale")
+    client = _client([stored])
+    app = _app_with(client, ProposalStore())
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(
+            savedSearchId=42,
+            searchFilters={"city": "Del Mar"},
+            esQuery='{"bool": {}}',
+            searchUrl="explore/listings/saved-search/42/for-sale?city=Del%20Mar",
+            searchMode="forSale",
+            criteriaSummary="Del Mar, for sale",
+        ),
+        _FakeCtx(TOKEN),
+    )
+
+    body = result[UPDATE_SAVED_SEARCH_KEY]
+    assert body["status"] == "no_change"
+    assert "notificationFrequency" not in body
+
+
+async def test_deterministic_fallback_avoids_reproducing_the_current_name() -> None:
+    """🔴 The deterministic fallback (after two regeneration failures) is
+    built from `criteriaSummary`, which has no reason to know the record's
+    OWN current name -- if it coincidentally reproduces it, the resulting
+    `_settle_generated_name` call must still avoid it, via `also_avoid_name`,
+    rather than silently collapsing an intended rename into a no-op."""
+    # `fallback_name("Del Mar Homes", max_length=60)` deterministically
+    # produces "Del Mar Homes Search" -- distinct from "Del Mar Homes" itself,
+    # so this drives the fallback via a criteriaSummary chosen to reproduce
+    # the CURRENT name after `dedupe_fallback_name` would otherwise accept it
+    # outright, by pre-seeding a same-named collision record `dedupe_fallback_name`
+    # must dodge into "(2)", then asserting that suffixed form still isn't
+    # blocked by the current name. In other words: the current name behaves
+    # as an implicit taken name whether or not any OTHER record has it.
+    stored = _record(saved_search_id=42, name="Del Mar Homes Search")
+    client = _client([stored])
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN)
+    fingerprint = criteria_fingerprint(stored.search_filters, stored.search_mode)
+    store.note_naming_failure(user_key, fingerprint)
+    store.note_naming_failure(user_key, fingerprint)
+    app = _app_with(client, store)
+
+    result = await _propose(
+        app,
+        _params(name="Some Generated Name", nameWasGenerated=True, criteriaSummary="Del Mar Homes"),
+        _FakeCtx(TOKEN),
+    )
+
+    body = result[UPDATE_SAVED_SEARCH_KEY]
+    assert body["status"] == "ready"
+    assert body["name"] != stored.name

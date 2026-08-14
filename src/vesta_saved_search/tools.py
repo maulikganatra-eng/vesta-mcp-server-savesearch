@@ -8,6 +8,8 @@ tools on a bare `FastMCP` instance without going through the full app factory.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -157,7 +159,11 @@ class UpdateSavedSearchParams(BaseModel):
 
     savedSearchId: int | None = None
     name: str | None = None
-    nameWasGenerated: bool = False
+    #: Required whenever `name` is set -- `None` (rather than a `False`
+    #: default) so the validator below can tell "explicitly stated" apart
+    #: from "omitted"; a default would let a forgotten flag on a rename to a
+    #: generated name silently read as user-stated (see the validator).
+    nameWasGenerated: bool | None = None
     searchFilters: dict[str, Any] | None = None
     esQuery: str | None = None
     searchUrl: str | None = None
@@ -200,8 +206,23 @@ class UpdateSavedSearchParams(BaseModel):
             # against the stored record can. That diff-based rejection lives
             # in `_propose_update`, after the record is fetched, right after
             # `name_changed`/`criteria_changed` are computed.
-            if has_criteria and (
-                self.esQuery is None or self.searchUrl is None or self.searchMode is None
+            #
+            # All-or-nothing across the whole criteria bundle, not just
+            # "searchFilters implies the rest" -- `searchMode` (or `esQuery`
+            # / `searchUrl`) sent alone, without `searchFilters`, used to
+            # pass validation and then be silently ignored by `_propose_update`
+            # (which only reads them inside the `searchFilters is not None`
+            # branch), with no error telling the caller their mode change
+            # never took effect.
+            has_any_criteria_field = any(
+                value is not None
+                for value in (self.searchFilters, self.esQuery, self.searchUrl, self.searchMode)
+            )
+            if has_any_criteria_field and not (
+                has_criteria
+                and self.esQuery is not None
+                and self.searchUrl is not None
+                and self.searchMode is not None
             ):
                 raise ValueError(
                     "a criteria change requires searchFilters, esQuery, searchUrl and "
@@ -212,6 +233,8 @@ class UpdateSavedSearchParams(BaseModel):
                     "criteriaSummary is required whenever name or searchFilters is set -- "
                     "needed for the deterministic fallback name if a generated name collides"
                 )
+            if has_name and self.nameWasGenerated is None:
+                raise ValueError("nameWasGenerated is required whenever name is set")
         return self
 
 
@@ -278,6 +301,7 @@ def _settle_generated_name(
     collision_records: list[SavedSearchRecord],
     all_records: list[SavedSearchRecord],
     user_stated_collision_status: str,
+    also_avoid_name: str | None = None,
 ) -> dict[str, Any] | tuple[str, int]:
     """Resolve `candidate_name` to `(final_name, regeneration_attempts)`, or a
     bare status body the caller should envelope and return immediately.
@@ -302,6 +326,13 @@ def _settle_generated_name(
     share the same `criteriaSummary`-derived fallback, and a collision
     caught here at propose time is cheaper than one first discovered at
     confirm time as `name_exists`.
+
+    `also_avoid_name` (update path only): the record's OWN current name,
+    which is not in `collision_records` (excluded there as "not a collision
+    with a different search") but which the deterministic fallback must
+    still not reproduce -- otherwise a rename that fell all the way through
+    to the fallback could silently collapse into the record's existing
+    name, contradicting the `name_changed` reasoning that got it here.
     """
     name_collision = find_by_name(collision_records, candidate_name)
     too_long = len(candidate_name) > SAVED_SEARCH_NAME_MAX_LENGTH
@@ -336,7 +367,10 @@ def _settle_generated_name(
         unsupported_filters=unsupported_filters,
     )
     final_name = dedupe_fallback_name(
-        fallback, collision_records, max_length=SAVED_SEARCH_NAME_MAX_LENGTH
+        fallback,
+        collision_records,
+        max_length=SAVED_SEARCH_NAME_MAX_LENGTH,
+        avoid_names=(also_avoid_name,) if also_avoid_name is not None else (),
     )
     return final_name, attempts
 
@@ -393,7 +427,9 @@ def register_tools(
             }
         return existing, current
 
-    async def _propose_update(params: UpdateSavedSearchParams, token: str) -> dict[str, Any]:
+    async def _propose_update(
+        params: UpdateSavedSearchParams, token: str, *, envelope_key: str
+    ) -> dict[str, Any]:
         """`update_saved_search`'s propose path (steps N7 + N8 / VA-404 + VA-405).
 
         Covers a rename, a criteria change, a frequency change, or a
@@ -417,8 +453,30 @@ def register_tools(
         URL from the model therefore has no code path left that could ever
         send its path anywhere — there is nothing to assert against because
         there is nothing left to go wrong.
+
+        Check ordering below is deliberate, in three passes:
+
+        1. Cheap, params-only checks that need no HTTP call (frequency
+           FORMAT only -- not yet whether it is safe to carry forward).
+        2. Fetch the record, then compute what actually changed (name /
+           criteria / frequency) as pure diffs against it -- no rejecting
+           yet. The rename/criteria exclusivity guard runs FIRST among the
+           diff-dependent checks, before either the criteria-duplicate/URL
+           checks or name resolution, so a caller combining the two always
+           hears about the combination, not whichever single-concern check
+           happens to run first.
+        3. Only once a real (non-empty) diff is confirmed -- i.e. AFTER the
+           `no_change` short-circuit -- do the checks that exist purely to
+           guard what is about to be SENT run: the stored `search_mode`'s
+           mappability (when criteria is not what changed) and the stored
+           `notification_frequency`'s validity (when frequency is not what
+           changed, since a corrupted/unmappable `"unknown"` stored value
+           would otherwise be silently carried into `apply_update` and
+           crash there uncaught). A genuinely no-op call on a record with
+           either kind of corrupted stored data must still resolve to
+           `no_change`, never `invalid`.
         """
-        key = UPDATE_SAVED_SEARCH_KEY
+        key = envelope_key
         saved_search_id = params.savedSearchId
         if saved_search_id is None:  # pragma: no cover - unreachable, guarded by the model validator
             return {key: {"status": "invalid", "message": "savedSearchId is required"}}
@@ -451,31 +509,36 @@ def register_tools(
             new_fingerprint = criteria_fingerprint(search_filters, params.searchMode)
             criteria_changed = new_fingerprint != current_fingerprint
 
-        if not criteria_changed:
-            try:
-                # Fail fast, at PROPOSE time, but ONLY when criteria is
-                # unchanged: `apply_update`'s step 4 maps `current.search_mode`
-                # via `search_mode_for_es_query` ONLY on that path (a criteria
-                # change instead uses the caller-supplied `fresh_es_query`
-                # directly and never touches this mapping at all) -- so a
-                # rename or frequency-only change on a record with an
-                # unmappable stored `searchType` would otherwise be blocked
-                # forever, while a criteria change on that same record would
-                # succeed. Checking here means the model gets a clear,
-                # specific reason immediately for the case that actually
-                # needs it, instead of a generic upstream `error` only after
-                # the user has already confirmed a proposal that could never
-                # have succeeded. Genuinely reachable here (this branch also
-                # covers the old dedicated notifications tool's frequency-only
-                # path, which has no fingerprint gate of its own).
-                search_mode_for_es_query(current.search_mode)
-            except SavedSearchApiError as exc:
-                return {
-                    key: {
-                        "status": "invalid",
-                        "message": f"cannot update this saved search: {exc}",
-                    }
+        # `candidate_name` (rather than testing `params.name` again below) is
+        # what lets mypy narrow it to `str` inside the `if candidate_name is
+        # not None:` block -- `name_changed` alone would be a `bool` with no
+        # memory of which branch proved it, and this repo's lint config bans
+        # `assert` in production code (S101; it is stripped by `-O`), so a
+        # narrowing assert is not the way to bridge that gap here.
+        candidate_name = params.name
+        name_changed = candidate_name is not None and normalise_name(candidate_name) != normalise_name(
+            current.name
+        )
+        # ⚠️ One change per call. `UpdateSavedSearchParams`'s validator does
+        # NOT reject a call carrying both `name` and `searchFilters` present
+        # -- field PRESENCE can't tell "resent unchanged" apart from
+        # "actually changing both", only a DIFF against the stored record
+        # can. This is that diff-based guard: it can only ever fire if BOTH
+        # turn out, after comparing against the stored record, to be genuine
+        # changes. Runs BEFORE the criteria-specific duplicate/URL checks
+        # below, so a combined rename+criteria call always hears about the
+        # combination first, rather than a criteria-only rejection that
+        # leaves the real problem undiscovered until the caller retries.
+        if name_changed and criteria_changed:
+            return {
+                key: {
+                    "status": "invalid",
+                    "message": (
+                        "a rename and a criteria change cannot be combined in one call -- "
+                        "change one at a time"
+                    ),
                 }
+            }
 
         if criteria_changed:
             # Precedence matches N5's create path: criteria before name.
@@ -494,48 +557,25 @@ def register_tools(
                 return {key: {"status": "invalid", "message": "searchUrl does not match searchFilters"}}
 
         update_fingerprint = new_fingerprint if criteria_changed else current_fingerprint
-        # `candidate_name` (rather than testing `params.name` again below) is
-        # what lets mypy narrow it to `str` inside the `if candidate_name is
-        # not None:` block -- `name_changed` alone would be a `bool` with no
-        # memory of which branch proved it, and this repo's lint config bans
-        # `assert` in production code (S101; it is stripped by `-O`), so a
-        # narrowing assert is not the way to bridge that gap here.
-        candidate_name = params.name
-        name_changed = candidate_name is not None and normalise_name(candidate_name) != normalise_name(
-            current.name
-        )
-        # ⚠️ One change per call. `UpdateSavedSearchParams`'s validator does
-        # NOT reject a call carrying both `name` and `searchFilters` present
-        # -- field PRESENCE can't tell "resent unchanged" apart from
-        # "actually changing both", only a DIFF against the stored record
-        # can. This is that diff-based guard: it can only ever fire if BOTH
-        # turn out, after comparing against the stored record, to be genuine
-        # changes.
-        if name_changed and criteria_changed:
-            return {
-                key: {
-                    "status": "invalid",
-                    "message": (
-                        "a rename and a criteria change cannot be combined in one call -- "
-                        "change one at a time"
-                    ),
-                }
-            }
 
         final_name = current.name
         regeneration_attempts = 0
         if candidate_name is not None and name_changed:
+            name_was_generated = params.nameWasGenerated
+            if name_was_generated is None:  # pragma: no cover - unreachable, guarded by the validator
+                name_was_generated = False
             settled = _settle_generated_name(
                 store,
                 user_key,
                 update_fingerprint,
                 candidate_name=candidate_name,
-                name_was_generated=params.nameWasGenerated,
+                name_was_generated=name_was_generated,
                 criteria_summary=params.criteriaSummary or "",
                 unsupported_filters=params.unsupportedFilters,
                 collision_records=others,
                 all_records=existing,
                 user_stated_collision_status="name_exists",
+                also_avoid_name=current.name,
             )
             if isinstance(settled, dict):
                 return {key: settled}
@@ -566,14 +606,69 @@ def register_tools(
         if not change:
             # An empty diff means there is nothing to confirm -- never issue
             # a ticket for a no-op. Returned at PROPOSE time, before
-            # `store.put` stashes anything.
-            return {
-                key: {
-                    "status": "no_change",
-                    "savedSearchId": saved_search_id,
-                    "name": current.name,
-                }
+            # `store.put` stashes anything, and BEFORE either of the
+            # send-time guards below -- a record with corrupted/unmappable
+            # stored data (search_mode or notification_frequency) that the
+            # caller is not actually touching must still resolve to
+            # `no_change`, not `invalid`.
+            no_change_response: dict[str, Any] = {
+                "status": "no_change",
+                "savedSearchId": saved_search_id,
+                "name": current.name,
             }
+            if params.notificationFrequency is not None:
+                no_change_response["notificationFrequency"] = params.notificationFrequency
+            return {key: no_change_response}
+
+        if not criteria_changed:
+            try:
+                # Fail fast, at PROPOSE time, but ONLY when criteria is
+                # unchanged: `apply_update`'s step 4 maps `current.search_mode`
+                # via `search_mode_for_es_query` ONLY on that path (a criteria
+                # change instead uses the caller-supplied `fresh_es_query`
+                # directly and never touches this mapping at all) -- so a
+                # rename or frequency-only change on a record with an
+                # unmappable stored `searchType` would otherwise be blocked
+                # forever, while a criteria change on that same record would
+                # succeed. Checking here means the model gets a clear,
+                # specific reason immediately for the case that actually
+                # needs it, instead of a generic upstream `error` only after
+                # the user has already confirmed a proposal that could never
+                # have succeeded. Genuinely reachable here (this branch also
+                # covers the old dedicated notifications tool's frequency-only
+                # path, which has no fingerprint gate of its own).
+                search_mode_for_es_query(current.search_mode)
+            except SavedSearchApiError as exc:
+                return {
+                    key: {
+                        "status": "invalid",
+                        "message": f"cannot update this saved search: {exc}",
+                    }
+                }
+
+        if not frequency_changed:
+            try:
+                # Mirrors the `search_mode` guard just above, for the same
+                # reason: `apply_update` carries `current.notification_frequency`
+                # forward UNCHANGED whenever frequency is not what changed, and
+                # sends it straight to `client.update` -> `frequency_to_schedule_interval`.
+                # A record whose stored frequency is the reachable `"unknown"`
+                # state (no `(notify, scheduleId)` pair this server recognises,
+                # see `schedule_pair_to_frequency`) would otherwise reach that
+                # call at CONFIRM time and raise an uncaught `ValueError` there
+                # instead of answering `invalid` here, at propose time.
+                frequency_to_schedule_interval(current.notification_frequency)
+            except ValueError:
+                return {
+                    key: {
+                        "status": "invalid",
+                        "message": (
+                            "cannot update this saved search: its stored notification "
+                            "frequency is not one this server recognises -- a new "
+                            "notificationFrequency must be supplied to fix it"
+                        ),
+                    }
+                }
 
         proposal = store.put(
             user_key,
@@ -584,20 +679,20 @@ def register_tools(
             regeneration_attempts=regeneration_attempts,
         )
 
-        response: dict[str, Any] = {
+        ready_response: dict[str, Any] = {
             "status": "ready",
             "proposalId": proposal.proposal_id,
             "savedSearchId": saved_search_id,
             "name": final_name,
         }
         if params.notificationFrequency is not None:
-            response["notificationFrequency"] = params.notificationFrequency
+            ready_response["notificationFrequency"] = params.notificationFrequency
         if criteria_changed:
-            response["criteriaSummary"] = params.criteriaSummary
-            response["unsupportedFilters"] = params.unsupportedFilters
-        return {key: response}
+            ready_response["criteriaSummary"] = params.criteriaSummary
+            ready_response["unsupportedFilters"] = params.unsupportedFilters
+        return {key: ready_response}
 
-    async def _confirm_update(proposal: Proposal, token: str) -> dict[str, Any]:
+    async def _confirm_update(proposal: Proposal, token: str, *, envelope_key: str) -> dict[str, Any]:
         """`update_saved_search`'s confirm path (steps N7 + N8 / VA-404 + VA-405).
 
         Re-runs both duplicate checks against LIVE data, same as the create
@@ -607,7 +702,7 @@ def register_tools(
         checks: it always matches its own current name and fingerprint,
         which is not a collision with itself.
         """
-        key = UPDATE_SAVED_SEARCH_KEY
+        key = envelope_key
         saved_search_id = proposal.payload["saved_search_id"]
         change = UpdateChange(**proposal.payload["change"])
 
@@ -877,6 +972,23 @@ def register_tools(
 
         return proposal
 
+    @contextmanager
+    def _release_unless_consumed(proposal: Proposal) -> Iterator[None]:
+        """The `try/finally: store.release(...)` shared by `save_search`,
+        `update_saved_search` and `delete_saved_search`, once each has a
+        CLAIMED `Proposal` in hand from `_resolve_confirmed_proposal`.
+
+        Every return from the wrapped block except the one that calls
+        `store.mark_consumed` falls through with `proposal.consumed` still
+        `False` -- release the claim so a legitimate retry (fix the name,
+        try again) is not permanently stuck reporting `proposal_in_progress`.
+        """
+        try:
+            yield
+        finally:
+            if not proposal.consumed:
+                store.release(proposal)
+
     @app.tool(name="save_search")
     async def save_search(params: SaveSearchParams, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
         """The writer for a NEW saved search. Input is `{proposalId, confirmed}`.
@@ -910,7 +1022,7 @@ def register_tools(
             return resolved
         proposal = resolved
 
-        try:
+        with _release_unless_consumed(proposal):
             try:
                 existing = await client.list_saved_searches(token)
             except SavedSearchApiError as exc:
@@ -961,13 +1073,6 @@ def register_tools(
             result = _record_to_dict(record)
             store.mark_consumed(proposal, result=result)
             return {SAVE_SEARCH_KEY: {"status": "ok", **result}}
-        finally:
-            # Every return above except the `mark_consumed` one falls
-            # through to here with `proposal.consumed` still `False` --
-            # release the claim so a legitimate retry (fix the name, try
-            # again) is not permanently stuck reporting `proposal_in_progress`.
-            if not proposal.consumed:
-                store.release(proposal)
 
     @app.tool(name="update_saved_search")
     async def update_saved_search(
@@ -1008,7 +1113,7 @@ def register_tools(
             return {UPDATE_SAVED_SEARCH_KEY: {"status": "sign_in_required"}}
 
         if params.savedSearchId is not None:
-            return await _propose_update(params, token)
+            return await _propose_update(params, token, envelope_key=UPDATE_SAVED_SEARCH_KEY)
 
         # Confirm shape: proposalId + confirmed. The params validator
         # guarantees proposalId is set whenever savedSearchId is not.
@@ -1025,11 +1130,8 @@ def register_tools(
             return resolved
         proposal = resolved
 
-        try:
-            return await _confirm_update(proposal, token)
-        finally:
-            if not proposal.consumed:
-                store.release(proposal)
+        with _release_unless_consumed(proposal):
+            return await _confirm_update(proposal, token, envelope_key=UPDATE_SAVED_SEARCH_KEY)
 
     @app.tool(name="delete_saved_search")
     async def delete_saved_search(
@@ -1101,7 +1203,7 @@ def register_tools(
             return resolved
         stashed_proposal = resolved
 
-        try:
+        with _release_unless_consumed(stashed_proposal):
             saved_search_id = stashed_proposal.payload["saved_search_id"]
             try:
                 await client.delete(token, saved_search_id)
@@ -1111,9 +1213,6 @@ def register_tools(
             result = {"savedSearchId": saved_search_id}
             store.mark_consumed(stashed_proposal, result=result)
             return {DELETE_SAVED_SEARCH_KEY: {"status": "ok", **result}}
-        finally:
-            if not stashed_proposal.consumed:
-                store.release(stashed_proposal)
 
 
 __all__ = [
