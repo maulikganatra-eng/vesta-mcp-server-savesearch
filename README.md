@@ -3,6 +3,25 @@
 MCP tool server for MLS saved searches — list, propose, save, update and delete a
 user's saved property searches.
 
+## Response envelope
+
+Every tool wraps its response under a single top-level key **named after the
+tool itself** — `{"list_saved_searches": {...}}`, `{"save_search": {...}}`, and
+so on (the exported constants in `src/vesta_saved_search/tools.py`, e.g.
+`LIST_SAVED_SEARCHES_KEY`, are the source of truth; import them in new tests
+rather than hardcoding the literal). This matches `vesta-mcp-server`'s own
+convention — "each tool returns a single-key envelope named after the tool"
+(that repo's README) — and it is not merely a convention on this side: the
+orchestrator's `capability_executor.py` now derives its internal grouping key
+(`mode_key`) from the calling MCP tool's own name, unconditionally, rather
+than trusting whatever key a server happens to wrap under. An earlier version
+of this server wrapped every tool under one shared constant instead
+(`"saved_search"`), which the orchestrator was still trusting for naming at
+the time — two different tool calls in the same turn collided on that one key.
+The orchestrator-side fix means a server that still did this today would no
+longer corrupt anything, but it would still produce an uninformative key, so
+keep this convention regardless.
+
 The build order, the tests for each step and the reasoning behind them live in
 `notes/saved-search-incremental-build-and-test-plan.md` in the backend repo
 (`smart-search-for-guestSide`). **This repo implements steps N1–N9 of that plan**,

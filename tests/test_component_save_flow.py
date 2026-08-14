@@ -123,7 +123,7 @@ async def test_full_propose_confirm_write_over_a_real_mcp_client() -> None:
         proposed = await client.call_tool(
             "propose_saved_search", {"params": _VALID_PROPOSAL_INPUT}, meta={META_TOKEN_KEY: TOKEN_A}
         )
-        proposal_body = _envelope(proposed)["saved_search"]
+        proposal_body = _envelope(proposed)["propose_saved_search"]
         assert proposal_body["status"] == "ready"
         proposal_id = proposal_body["proposalId"]
 
@@ -132,7 +132,7 @@ async def test_full_propose_confirm_write_over_a_real_mcp_client() -> None:
             {"params": {"proposalId": proposal_id, "confirmed": True}},
             meta={META_TOKEN_KEY: TOKEN_A},
         )
-        save_body = _envelope(confirmed)["saved_search"]
+        save_body = _envelope(confirmed)["save_search"]
 
     assert save_body["status"] == "ok"
     assert save_body["name"] == "Del Mar Homes"
@@ -144,20 +144,20 @@ async def test_walking_every_propose_branch_keeps_the_write_count_at_zero() -> N
     async with create_connected_server_and_client_session(_app(fake)) as client:
         # sign_in_required -- no meta at all
         anon = await client.call_tool("propose_saved_search", {"params": _VALID_PROPOSAL_INPUT})
-        assert _envelope(anon)["saved_search"]["status"] == "sign_in_required"
+        assert _envelope(anon)["propose_saved_search"]["status"] == "sign_in_required"
 
         # invalid frequency
         bad_freq = dict(_VALID_PROPOSAL_INPUT, notificationFrequency="weekly")
         result = await client.call_tool(
             "propose_saved_search", {"params": bad_freq}, meta={META_TOKEN_KEY: TOKEN_A}
         )
-        assert _envelope(result)["saved_search"]["status"] == "invalid"
+        assert _envelope(result)["propose_saved_search"]["status"] == "invalid"
 
         # a name collision after a first successful proposal+save
         first = await client.call_tool(
             "propose_saved_search", {"params": _VALID_PROPOSAL_INPUT}, meta={META_TOKEN_KEY: TOKEN_A}
         )
-        proposal_id = _envelope(first)["saved_search"]["proposalId"]
+        proposal_id = _envelope(first)["propose_saved_search"]["proposalId"]
         await client.call_tool(
             "save_search",
             {"params": {"proposalId": proposal_id, "confirmed": True}},
@@ -171,7 +171,7 @@ async def test_walking_every_propose_branch_keeps_the_write_count_at_zero() -> N
         collision = await client.call_tool(
             "propose_saved_search", {"params": collision_input}, meta={META_TOKEN_KEY: TOKEN_A}
         )
-        assert _envelope(collision)["saved_search"]["status"] == "name_exists"
+        assert _envelope(collision)["propose_saved_search"]["status"] == "name_exists"
 
     # Exactly the one save from the successful branch above -- every other
     # branch (sign_in_required, invalid, name_exists) wrote nothing.
@@ -211,8 +211,8 @@ async def test_a_proposalid_from_one_user_is_refused_with_another_users_token() 
                 "propose_saved_search", {"params": proposal_b_input}, meta={META_TOKEN_KEY: TOKEN_B}
             ),
         )
-        proposal_id_a = _envelope(proposed_a)["saved_search"]["proposalId"]
-        proposal_id_b = _envelope(proposed_b)["saved_search"]["proposalId"]
+        proposal_id_a = _envelope(proposed_a)["propose_saved_search"]["proposalId"]
+        proposal_id_b = _envelope(proposed_b)["propose_saved_search"]["proposalId"]
 
         # Both pending at once -- confirm B first, then A, then attack.
         confirmed_b = await client.call_tool(
@@ -246,7 +246,7 @@ async def test_a_proposalid_from_one_user_is_refused_with_another_users_token() 
         proposed_c = await client.call_tool(
             "propose_saved_search", {"params": proposal_c_input}, meta={META_TOKEN_KEY: TOKEN_A}
         )
-        proposal_id_c = _envelope(proposed_c)["saved_search"]["proposalId"]
+        proposal_id_c = _envelope(proposed_c)["propose_saved_search"]["proposalId"]
         stolen_unconsumed = await client.call_tool(
             "save_search",
             {"params": {"proposalId": proposal_id_c, "confirmed": True}},
@@ -256,13 +256,13 @@ async def test_a_proposalid_from_one_user_is_refused_with_another_users_token() 
         list_a = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_A})
         list_b = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_B})
 
-    assert _envelope(confirmed_a)["saved_search"]["status"] == "ok"
-    assert _envelope(confirmed_b)["saved_search"]["status"] == "ok"
-    assert _envelope(stolen)["saved_search"]["status"] == "proposal_expired"
-    assert _envelope(stolen_unconsumed)["saved_search"]["status"] == "proposal_expired"
+    assert _envelope(confirmed_a)["save_search"]["status"] == "ok"
+    assert _envelope(confirmed_b)["save_search"]["status"] == "ok"
+    assert _envelope(stolen)["save_search"]["status"] == "proposal_expired"
+    assert _envelope(stolen_unconsumed)["save_search"]["status"] == "proposal_expired"
 
-    names_a = {r["name"] for r in _envelope(list_a)["saved_search"]["savedSearches"]}
-    names_b = {r["name"] for r in _envelope(list_b)["saved_search"]["savedSearches"]}
+    names_a = {r["name"] for r in _envelope(list_a)["list_saved_searches"]["savedSearches"]}
+    names_b = {r["name"] for r in _envelope(list_b)["list_saved_searches"]["savedSearches"]}
     assert names_a == {"A-Malibu"}, "B's write, or the stolen write, leaked into A's account"
     assert names_b == {"B-DelMar"}, "A's write leaked into B's account"
 
@@ -297,8 +297,8 @@ async def test_criteria_did_not_swap_between_concurrent_users() -> None:
                 "propose_saved_search", {"params": proposal_b_input}, meta={META_TOKEN_KEY: TOKEN_B}
             ),
         )
-        proposal_id_a = _envelope(proposed_a)["saved_search"]["proposalId"]
-        proposal_id_b = _envelope(proposed_b)["saved_search"]["proposalId"]
+        proposal_id_a = _envelope(proposed_a)["propose_saved_search"]["proposalId"]
+        proposal_id_b = _envelope(proposed_b)["propose_saved_search"]["proposalId"]
 
         await asyncio.gather(
             client.call_tool(
@@ -316,7 +316,7 @@ async def test_criteria_did_not_swap_between_concurrent_users() -> None:
         list_a = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_A})
         list_b = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_B})
 
-    record_a = _envelope(list_a)["saved_search"]["savedSearches"][0]
-    record_b = _envelope(list_b)["saved_search"]["savedSearches"][0]
+    record_a = _envelope(list_a)["list_saved_searches"]["savedSearches"][0]
+    record_b = _envelope(list_b)["list_saved_searches"]["savedSearches"][0]
     assert record_a["searchFilters"]["city"] == "Malibu"
     assert record_b["searchFilters"]["city"] == "Del Mar"

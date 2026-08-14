@@ -139,9 +139,10 @@ async def test_rename_only_over_a_real_mcp_client_preserves_frequency_and_filter
 
     async with create_connected_server_and_client_session(_app(fake)) as client:
         proposed = await client.call_tool(
-            "propose_saved_search",
+            "update_saved_search",
             {
                 "params": {
+                    "savedSearchId": saved_search_id,
                     "name": "New Name",
                     "nameWasGenerated": False,
                     "searchFilters": {"city": "Del Mar", "mode": "forSale"},
@@ -151,21 +152,19 @@ async def test_rename_only_over_a_real_mcp_client_preserves_frequency_and_filter
                     "criteriaSummary": "Del Mar, for sale",
                     "unsupportedFilters": [],
                     "notificationFrequency": "daily",
-                    "intent": "update_existing",
-                    "savedSearchId": saved_search_id,
                 }
             },
             meta={META_TOKEN_KEY: TOKEN_A},
         )
-        proposal_id = _envelope(proposed)["saved_search"]["proposalId"]
+        proposal_id = _envelope(proposed)["update_saved_search"]["proposalId"]
 
         confirmed = await client.call_tool(
-            "save_search",
+            "update_saved_search",
             {"params": {"proposalId": proposal_id, "confirmed": True}},
             meta={META_TOKEN_KEY: TOKEN_A},
         )
 
-    body = _envelope(confirmed)["saved_search"]
+    body = _envelope(confirmed)["update_saved_search"]
     assert body["status"] == "ok"
     assert body["name"] == "New Name"
     assert len(fake.update_calls) == 1
@@ -179,7 +178,12 @@ async def test_rename_only_over_a_real_mcp_client_preserves_frequency_and_filter
     assert "fresh-for-" in sent["esQuery"]
 
 
-async def test_notification_frequency_change_via_the_dedicated_tool() -> None:
+async def test_notification_frequency_change_via_update_saved_search() -> None:
+    """The frequency-only path a prior version of this server exposed as a
+    separate `update_saved_search_notifications` tool -- folded into
+    `update_saved_search` since a frequency-only call needs only
+    `savedSearchId` + `notificationFrequency`, exactly as the dedicated tool
+    did."""
     fake = _FakeGuestSite()
     saved_search_id = fake.seed(
         TOKEN_A, name="Del Mar Daily", filters={"city": "Del Mar", "mode": "forSale"}, city="Del Mar"
@@ -187,21 +191,21 @@ async def test_notification_frequency_change_via_the_dedicated_tool() -> None:
 
     async with create_connected_server_and_client_session(_app(fake)) as client:
         proposed = await client.call_tool(
-            "update_saved_search_notifications",
+            "update_saved_search",
             {"params": {"savedSearchId": saved_search_id, "notificationFrequency": "never"}},
             meta={META_TOKEN_KEY: TOKEN_A},
         )
-        assert _envelope(proposed)["saved_search"]["status"] == "ready"
-        assert len(fake.update_calls) == 0, "notifications tool must not write before confirmation"
+        assert _envelope(proposed)["update_saved_search"]["status"] == "ready"
+        assert len(fake.update_calls) == 0, "update_saved_search must not write before confirmation"
 
-        proposal_id = _envelope(proposed)["saved_search"]["proposalId"]
+        proposal_id = _envelope(proposed)["update_saved_search"]["proposalId"]
         confirmed = await client.call_tool(
-            "save_search",
+            "update_saved_search",
             {"params": {"proposalId": proposal_id, "confirmed": True}},
             meta={META_TOKEN_KEY: TOKEN_A},
         )
 
-    body = _envelope(confirmed)["saved_search"]
+    body = _envelope(confirmed)["update_saved_search"]
     assert body["status"] == "ok"
     assert body["notificationFrequency"] == "never"
     sent = fake.update_calls[0]
@@ -236,14 +240,14 @@ async def test_delete_ordering_propose_save_then_propose_delete_then_confirm() -
             },
             meta={META_TOKEN_KEY: TOKEN_A},
         )
-        save_proposal_id = _envelope(save_proposal)["saved_search"]["proposalId"]
+        save_proposal_id = _envelope(save_proposal)["propose_saved_search"]["proposalId"]
 
         delete_proposal = await client.call_tool(
             "delete_saved_search",
             {"params": {"savedSearchId": saved_search_id}},
             meta={META_TOKEN_KEY: TOKEN_A},
         )
-        delete_proposal_id = _envelope(delete_proposal)["saved_search"]["proposalId"]
+        delete_proposal_id = _envelope(delete_proposal)["delete_saved_search"]["proposalId"]
 
         stale_save_attempt = await client.call_tool(
             "save_search",
@@ -257,7 +261,7 @@ async def test_delete_ordering_propose_save_then_propose_delete_then_confirm() -
             meta={META_TOKEN_KEY: TOKEN_A},
         )
 
-    assert _envelope(stale_save_attempt)["saved_search"]["status"] == "proposal_expired"
-    assert _envelope(confirmed_delete)["saved_search"]["status"] == "ok"
+    assert _envelope(stale_save_attempt)["save_search"]["status"] == "proposal_expired"
+    assert _envelope(confirmed_delete)["delete_saved_search"]["status"] == "ok"
     assert fake.delete_calls == [saved_search_id]
     assert len(fake.update_calls) == 0

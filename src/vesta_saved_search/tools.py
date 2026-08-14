@@ -34,14 +34,23 @@ from vesta_saved_search.naming import (
 from vesta_saved_search.proposals import Proposal, ProposalAction, ProposalStore, user_key_from_token
 from vesta_saved_search.updates import UpdateChange, apply_update
 
-#: The single top-level key of every response this server's tools return.
-#:
-#: `capability_executor.py` unwraps a response with exactly one top-level
-#: dict-valued key and makes that key the `mode_key` (VA-398's contract with the
-#: orchestrator). Every branch below — success, sign-in-required, error — MUST
-#: keep this as the only top-level key, or a different branch would silently
-#: change `mode_key` for every response that hits it.
-_ENVELOPE_KEY = "saved_search"
+#: Every tool's own name doubles as its response envelope's single top-level
+#: key -- matching `vesta-mcp-server`'s convention ("each tool returns a
+#: single-key envelope named after the tool", that repo's README) and, since
+#: this rewrite, ENFORCED from the orchestrator side too:
+#: `capability_executor.py` unwraps a response's single top-level dict-valued
+#: key for its DATA, but always names `mode_key` after the calling tool, never
+#: after that wrapping key. A server that reused one constant across every
+#: tool (this module's own prior design) could no longer collide with itself
+#: even if it tried -- but every branch below still keeps one tool per key,
+#: because a self-describing key is still what a reader (or the response LLM)
+#: sees, and because the exported names below are what tests import instead
+#: of hardcoding the literal.
+LIST_SAVED_SEARCHES_KEY = "list_saved_searches"
+PROPOSE_SAVED_SEARCH_KEY = "propose_saved_search"
+SAVE_SEARCH_KEY = "save_search"
+UPDATE_SAVED_SEARCH_KEY = "update_saved_search"
+DELETE_SAVED_SEARCH_KEY = "delete_saved_search"
 
 #: Field names this tool emits on each record. Checked against
 #: `contains_sensitive_substring` by `test_sensitive_keys.py` so a name added here
@@ -58,11 +67,12 @@ RECORD_FIELD_NAMES = (
     "lastUpdate",
 )
 
-#: Field names `propose_saved_search` and `save_search` emit, beyond the ones
-#: already covered by `RECORD_FIELD_NAMES`. Same reason those are tracked:
-#: `test_sensitive_keys.py` loops over this tuple too, so a name added here
-#: later that happens to contain a sensitive substring is caught by that
-#: test rather than discovered as a field silently missing from production.
+#: Field names `propose_saved_search`, `save_search` and `update_saved_search`
+#: emit, beyond the ones already covered by `RECORD_FIELD_NAMES`. Same reason
+#: those are tracked: `test_sensitive_keys.py` loops over this tuple too, so a
+#: name added here later that happens to contain a sensitive substring is
+#: caught by that test rather than discovered as a field silently missing
+#: from production.
 PROPOSAL_FIELD_NAMES = (
     "status",
     "proposalId",
@@ -82,6 +92,9 @@ PROPOSAL_FIELD_NAMES = (
 class ProposeSavedSearchParams(BaseModel):
     """Input to `propose_saved_search` (step N5 / VA-401). Writes nothing upstream.
 
+    Create-only -- see `update_saved_search` for renaming, changing criteria,
+    or changing notification frequency on an EXISTING saved search.
+
     `searchFilters`, `esQuery`, `searchUrl`, `searchMode`, `criteriaSummary`
     and `unsupportedFilters` match `build_saved_search_input`'s output shape
     in the property-search repo (see the synced fixture
@@ -100,36 +113,106 @@ class ProposeSavedSearchParams(BaseModel):
     criteriaSummary: str
     unsupportedFilters: list[str] = Field(default_factory=list)
     notificationFrequency: str
-    #: `update_existing` requires `savedSearchId` and is handled by step N7's
-    #: `_propose_update` branch below -- see that function's docstring.
-    intent: Literal["auto", "create_new", "update_existing"] = "auto"
-    #: Required when `intent="update_existing"`. Identifies which of the
-    #: caller's own saved searches is being changed.
-    savedSearchId: int | None = None
+    #: A create is always a NEW search -- `auto` and `create_new` are
+    #: functionally identical today. Kept (rather than collapsed to a bare
+    #: bool) because `_settle_generated_name` still branches on it to choose
+    #: between `name_exists` and `name_conflict_create_only` on a user-stated
+    #: collision, and a caller stating its intent explicitly reads better
+    #: than an unexplained default.
+    intent: Literal["auto", "create_new"] = "auto"
 
 
 class SaveSearchParams(BaseModel):
-    """Input to `save_search` (step N6/N7 / VA-402/VA-404). Nothing else.
+    """Input to `save_search` (step N6 / VA-402). Nothing else. Confirms a
+    CREATE only -- see `update_saved_search` for confirming a rename,
+    criteria change, or frequency change.
 
     See `vesta_saved_search.proposals`'s module docstring for why this is
-    `{proposalId, confirmed}` and not a resend of the whole payload. Confirms
-    BOTH `save` and `update` proposals -- see the tool's own docstring.
+    `{proposalId, confirmed}` and not a resend of the whole payload.
     """
 
     proposalId: str
     confirmed: bool
 
 
-class UpdateSavedSearchNotificationsParams(BaseModel):
-    """Input to `update_saved_search_notifications` (step N8 / VA-405).
+class UpdateSavedSearchParams(BaseModel):
+    """Input to `update_saved_search` (steps N7 + N8 / VA-404 + VA-405): rename,
+    change criteria, and/or change notification frequency on an EXISTING saved
+    search. Exactly one of two shapes:
 
-    Exactly these two fields, per the plan -- everything else the full
-    six-step update recipe needs is read fresh from the stored record by
-    `apply_update`, never resent by the caller.
+    * **Propose:** `savedSearchId` plus at least one change (a new `name`, a
+      criteria bundle, and/or `notificationFrequency`). Writes nothing;
+      returns a `proposalId` and a confirmation summary.
+    * **Confirm:** `proposalId` + `confirmed`. The same shape `save_search`
+      uses, deliberately.
+
+    A rename and a criteria change may never be requested in the SAME call —
+    see the validator below. `notificationFrequency` may ride along with
+    either, since it does not change what the confirmation summary is about.
+
+    A frequency-only change needs only `savedSearchId` + `notificationFrequency`
+    — nothing else is required, which is what makes this tool also cover what
+    used to be `update_saved_search_notifications`'s whole job.
     """
 
-    savedSearchId: int
-    notificationFrequency: str
+    savedSearchId: int | None = None
+    name: str | None = None
+    nameWasGenerated: bool = False
+    searchFilters: dict[str, Any] | None = None
+    esQuery: str | None = None
+    searchUrl: str | None = None
+    searchMode: Literal["forSale", "forRent", "Sold"] | None = None
+    #: Required whenever `name` or `searchFilters` is set -- `_settle_generated_name`'s
+    #: deterministic-fallback path needs a plain-language description of the
+    #: criteria to build a fallback name from, regardless of whether criteria
+    #: itself is what changed.
+    criteriaSummary: str | None = None
+    unsupportedFilters: list[str] = Field(default_factory=list)
+    notificationFrequency: str | None = None
+
+    proposalId: str | None = None
+    confirmed: bool | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_shape(self) -> UpdateSavedSearchParams:
+        is_propose = self.savedSearchId is not None
+        is_confirm = self.proposalId is not None
+        if is_propose == is_confirm:
+            raise ValueError(
+                "provide exactly one of: savedSearchId (+ at least one change, to propose "
+                "an update), or proposalId + confirmed (to confirm one already proposed)"
+            )
+        if is_propose:
+            has_name = self.name is not None
+            has_criteria = self.searchFilters is not None
+            has_frequency = self.notificationFrequency is not None
+            if not (has_name or has_criteria or has_frequency):
+                raise ValueError(
+                    "a propose call needs at least one change: name, a criteria bundle "
+                    "(searchFilters + esQuery + searchUrl + searchMode + criteriaSummary), "
+                    "or notificationFrequency"
+                )
+            # Deliberately NOT rejecting "both name and searchFilters present"
+            # here. A caller may legitimately resend an unchanged field
+            # alongside a real change (the create-path params model has
+            # always worked this way) -- FIELD PRESENCE cannot tell "resent
+            # unchanged" apart from "actually changing both", only a DIFF
+            # against the stored record can. That diff-based rejection lives
+            # in `_propose_update`, after the record is fetched, right after
+            # `name_changed`/`criteria_changed` are computed.
+            if has_criteria and (
+                self.esQuery is None or self.searchUrl is None or self.searchMode is None
+            ):
+                raise ValueError(
+                    "a criteria change requires searchFilters, esQuery, searchUrl and "
+                    "searchMode together"
+                )
+            if (has_name or has_criteria) and self.criteriaSummary is None:
+                raise ValueError(
+                    "criteriaSummary is required whenever name or searchFilters is set -- "
+                    "needed for the deterministic fallback name if a generated name collides"
+                )
+        return self
 
 
 class DeleteSavedSearchParams(BaseModel):
@@ -196,12 +279,12 @@ def _settle_generated_name(
     all_records: list[SavedSearchRecord],
     user_stated_collision_status: str,
 ) -> dict[str, Any] | tuple[str, int]:
-    """Resolve `candidate_name` to `(final_name, regeneration_attempts)`, or an
-    envelope body the caller should return immediately.
+    """Resolve `candidate_name` to `(final_name, regeneration_attempts)`, or a
+    bare status body the caller should envelope and return immediately.
 
     The name-collision / length / unsupported-filter / regeneration /
     deterministic-fallback state machine shared by `propose_saved_search`'s
-    create path and `_propose_update`'s rename path — kept in one place so
+    create path and `update_saved_search`'s rename path — kept in one place so
     the two cannot drift on it independently, and so a rename gets the exact
     same `mentions_unsupported_filter` protection a create already had (a
     generated rename can reference a filter the search does not actually
@@ -209,6 +292,10 @@ def _settle_generated_name(
     user-STATED collision differs between the two callers
     (`name_conflict_create_only` vs `name_exists`), supplied via
     `user_stated_collision_status`.
+
+    Returns a BARE dict on early-return, deliberately -- each caller wraps it
+    under its own tool's envelope key, since the two callers no longer share
+    one.
 
     The deterministic fallback is re-checked against `collision_records`
     too (`dedupe_fallback_name`) — two structurally different searches can
@@ -282,14 +369,46 @@ def register_tools(
     store = proposal_store or ProposalStore()
     es_client = es_query_client or EsQueryClient(PROPERTY_SEARCH_INTERNAL_URL)
 
-    async def _propose_update(params: ProposeSavedSearchParams, token: str) -> dict[str, Any]:
-        """`propose_saved_search`'s `intent=update_existing` branch (step N7 / VA-404).
+    async def _find_record_or_invalid(
+        saved_search_id: int, token: str, *, envelope_key: str
+    ) -> tuple[list[SavedSearchRecord], SavedSearchRecord] | dict[str, Any]:
+        """Shared by every tool that needs "is this id one of the caller's own
+        saved searches" -- `update_saved_search`'s propose path and
+        `delete_saved_search`'s propose path both open with exactly this
+        sequence. Returns `(all_records, the_matching_one)` on success, or an
+        already-enveloped error/invalid body to return immediately.
+        """
+        try:
+            existing = await client.list_saved_searches(token)
+        except SavedSearchApiError as exc:
+            return {envelope_key: {"status": "error", "message": str(exc)}}
+
+        current = next((r for r in existing if r.saved_search_id == saved_search_id), None)
+        if current is None:
+            return {
+                envelope_key: {
+                    "status": "invalid",
+                    "message": f"no saved search with id {saved_search_id}",
+                }
+            }
+        return existing, current
+
+    async def _propose_update(params: UpdateSavedSearchParams, token: str) -> dict[str, Any]:
+        """`update_saved_search`'s propose path (steps N7 + N8 / VA-404 + VA-405).
+
+        Covers a rename, a criteria change, a frequency change, or a
+        frequency change riding alongside either of the other two -- never a
+        rename and a criteria change together, enforced by
+        `UpdateSavedSearchParams`'s own validator before this function is
+        even reached.
 
         Unlike a create proposal, the model may resend the record's OWN
         unchanged `searchFilters`/`searchUrl`/`esQuery` when only renaming or
         changing frequency — `apply_update` never trusts a caller-supplied
         `esQuery` for an unchanged-criteria update anyway (it always fetches
-        a fresh one via S4), so a stale value here is harmless.
+        a fresh one via S4), so a stale value here is harmless. In practice a
+        pure rename/frequency call from this tool's params model does not
+        carry those fields at all -- they are only set on a criteria change.
 
         🔴 The URL-format precondition is enforced STRUCTURALLY, not by
         inspecting `params.searchUrl`'s raw text: only its QUERY STRING is
@@ -299,39 +418,38 @@ def register_tools(
         send its path anywhere — there is nothing to assert against because
         there is nothing left to go wrong.
         """
-        if params.savedSearchId is None:
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": "savedSearchId is required when intent=update_existing",
-                }
-            }
+        key = UPDATE_SAVED_SEARCH_KEY
+        saved_search_id = params.savedSearchId
+        if saved_search_id is None:  # pragma: no cover - unreachable, guarded by the model validator
+            return {key: {"status": "invalid", "message": "savedSearchId is required"}}
 
-        try:
-            frequency_to_schedule_interval(params.notificationFrequency)
-        except ValueError as exc:
-            return {_ENVELOPE_KEY: {"status": "invalid", "message": str(exc)}}
+        if params.notificationFrequency is not None:
+            try:
+                frequency_to_schedule_interval(params.notificationFrequency)
+            except ValueError as exc:
+                return {key: {"status": "invalid", "message": str(exc)}}
 
-        try:
-            existing = await client.list_saved_searches(token)
-        except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+        found = await _find_record_or_invalid(saved_search_id, token, envelope_key=key)
+        if isinstance(found, dict):
+            return found
+        existing, current = found
 
-        current = next((r for r in existing if r.saved_search_id == params.savedSearchId), None)
-        if current is None:
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": f"no saved search with id {params.savedSearchId}",
-                }
-            }
-
-        others = [r for r in existing if r.saved_search_id != params.savedSearchId]
+        others = [r for r in existing if r.saved_search_id != saved_search_id]
         user_key = user_key_from_token(token)
 
-        new_fingerprint = criteria_fingerprint(params.searchFilters, params.searchMode)
+        # Bound to a local so the two fields stay narrowed together wherever
+        # `criteria_changed` is later checked -- the params validator
+        # guarantees `searchFilters`/`searchMode`/`searchUrl` all arrive
+        # together, but mypy has no way to know that fact about a LATER,
+        # separate `if criteria_changed:` block, only about code still
+        # inside THIS `if`.
+        search_filters = params.searchFilters
         current_fingerprint = criteria_fingerprint(current.search_filters, current.search_mode)
-        criteria_changed = new_fingerprint != current_fingerprint
+        criteria_changed = False
+        new_fingerprint = current_fingerprint
+        if search_filters is not None and params.searchMode is not None:
+            new_fingerprint = criteria_fingerprint(search_filters, params.searchMode)
+            criteria_changed = new_fingerprint != current_fingerprint
 
         if not criteria_changed:
             try:
@@ -347,25 +465,13 @@ def register_tools(
                 # specific reason immediately for the case that actually
                 # needs it, instead of a generic upstream `error` only after
                 # the user has already confirmed a proposal that could never
-                # have succeeded.
-                #
-                # Provably unreachable via THIS function today, and kept
-                # anyway: `criteria_fingerprint` bakes `search_mode` into the
-                # hash it compares, casefolded — so `criteria_changed` being
-                # `False` already guarantees `current.search_mode` casefolds
-                # to one of `params.searchMode`'s three valid literals, which
-                # are exactly the three `search_mode_for_es_query` maps. This
-                # guard is defensive against that fingerprint relationship
-                # ever changing, and it keeps this branch symmetric with
-                # `update_saved_search_notifications`'s identical check
-                # below, which genuinely IS reachable — that tool has no
-                # fingerprint gate at all, so a corrupted stored `searchType`
-                # reaches it directly. See that tool's test for the real
-                # coverage of this exact failure mode.
+                # have succeeded. Genuinely reachable here (this branch also
+                # covers the old dedicated notifications tool's frequency-only
+                # path, which has no fingerprint gate of its own).
                 search_mode_for_es_query(current.search_mode)
-            except SavedSearchApiError as exc:  # pragma: no cover
+            except SavedSearchApiError as exc:
                 return {
-                    _ENVELOPE_KEY: {
+                    key: {
                         "status": "invalid",
                         "message": f"cannot update this saved search: {exc}",
                     }
@@ -375,40 +481,64 @@ def register_tools(
             # Precedence matches N5's create path: criteria before name.
             duplicate = find_by_fingerprint(others, new_fingerprint)
             if duplicate is not None:
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "criteria_already_saved",
-                        "existingName": duplicate.name,
-                    }
-                }
-            if not url_matches_filters(params.searchUrl, params.searchFilters):
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "invalid",
-                        "message": "searchUrl does not match searchFilters",
-                    }
-                }
+                return {key: {"status": "criteria_already_saved", "existingName": duplicate.name}}
+            # `criteria_changed` is only ever True when `search_filters` and
+            # `params.searchUrl` are both already set (see above) -- the
+            # `is None` legs are unreachable, kept only so mypy can narrow
+            # both to non-None for the `url_matches_filters` call.
+            if (
+                search_filters is None  # pragma: no cover
+                or params.searchUrl is None  # pragma: no cover
+                or not url_matches_filters(params.searchUrl, search_filters)
+            ):
+                return {key: {"status": "invalid", "message": "searchUrl does not match searchFilters"}}
 
         update_fingerprint = new_fingerprint if criteria_changed else current_fingerprint
-        name_changed = normalise_name(params.name) != normalise_name(current.name)
+        # `candidate_name` (rather than testing `params.name` again below) is
+        # what lets mypy narrow it to `str` inside the `if candidate_name is
+        # not None:` block -- `name_changed` alone would be a `bool` with no
+        # memory of which branch proved it, and this repo's lint config bans
+        # `assert` in production code (S101; it is stripped by `-O`), so a
+        # narrowing assert is not the way to bridge that gap here.
+        candidate_name = params.name
+        name_changed = candidate_name is not None and normalise_name(candidate_name) != normalise_name(
+            current.name
+        )
+        # ⚠️ One change per call. `UpdateSavedSearchParams`'s validator does
+        # NOT reject a call carrying both `name` and `searchFilters` present
+        # -- field PRESENCE can't tell "resent unchanged" apart from
+        # "actually changing both", only a DIFF against the stored record
+        # can. This is that diff-based guard: it can only ever fire if BOTH
+        # turn out, after comparing against the stored record, to be genuine
+        # changes.
+        if name_changed and criteria_changed:
+            return {
+                key: {
+                    "status": "invalid",
+                    "message": (
+                        "a rename and a criteria change cannot be combined in one call -- "
+                        "change one at a time"
+                    ),
+                }
+            }
+
         final_name = current.name
         regeneration_attempts = 0
-
-        if name_changed:
+        if candidate_name is not None and name_changed:
             settled = _settle_generated_name(
                 store,
                 user_key,
                 update_fingerprint,
-                candidate_name=params.name,
+                candidate_name=candidate_name,
                 name_was_generated=params.nameWasGenerated,
-                criteria_summary=params.criteriaSummary,
+                criteria_summary=params.criteriaSummary or "",
                 unsupported_filters=params.unsupportedFilters,
                 collision_records=others,
                 all_records=existing,
                 user_stated_collision_status="name_exists",
             )
             if isinstance(settled, dict):
-                return {_ENVELOPE_KEY: settled}
+                return {key: settled}
             final_name, regeneration_attempts = settled
 
         store.clear_naming_attempts(user_key, update_fingerprint)
@@ -418,7 +548,8 @@ def register_tools(
         # a pure rename as a real frequency change, bypassing the exact
         # casefold fix this PR adds to `frequency_to_schedule_interval`.
         frequency_changed = (
-            params.notificationFrequency.strip().casefold() != current.notification_frequency
+            params.notificationFrequency is not None
+            and params.notificationFrequency.strip().casefold() != current.notification_frequency
         )
 
         renamed = normalise_name(final_name) != normalise_name(current.name)
@@ -432,10 +563,22 @@ def register_tools(
             change["fresh_es_query"] = params.esQuery
             change["new_search_url_query"] = urlsplit(params.searchUrl).query
 
+        if not change:
+            # An empty diff means there is nothing to confirm -- never issue
+            # a ticket for a no-op. Returned at PROPOSE time, before
+            # `store.put` stashes anything.
+            return {
+                key: {
+                    "status": "no_change",
+                    "savedSearchId": saved_search_id,
+                    "name": current.name,
+                }
+            }
+
         proposal = store.put(
             user_key,
             action="update",
-            payload={"saved_search_id": params.savedSearchId, "change": change},
+            payload={"saved_search_id": saved_search_id, "change": change},
             name=final_name,
             fingerprint=update_fingerprint,
             regeneration_attempts=regeneration_attempts,
@@ -444,51 +587,48 @@ def register_tools(
         response: dict[str, Any] = {
             "status": "ready",
             "proposalId": proposal.proposal_id,
-            "savedSearchId": params.savedSearchId,
+            "savedSearchId": saved_search_id,
             "name": final_name,
-            "notificationFrequency": params.notificationFrequency,
         }
+        if params.notificationFrequency is not None:
+            response["notificationFrequency"] = params.notificationFrequency
         if criteria_changed:
             response["criteriaSummary"] = params.criteriaSummary
             response["unsupportedFilters"] = params.unsupportedFilters
-        return {_ENVELOPE_KEY: response}
+        return {key: response}
 
     async def _confirm_update(proposal: Proposal, token: str) -> dict[str, Any]:
-        """`save_search`'s `update`-action branch (step N7 / VA-404).
+        """`update_saved_search`'s confirm path (steps N7 + N8 / VA-404 + VA-405).
 
         Re-runs both duplicate checks against LIVE data, same as the create
-        path's own re-check in `save_search` proper -- time passes between
-        propose and confirm, and a defence that only runs once is a defence
-        a future code path can skip. Excludes the record being updated from
-        both checks: it always matches its own current name and fingerprint,
+        path's own re-check in `save_search` -- time passes between propose
+        and confirm, and a defence that only runs once is a defence a future
+        code path can skip. Excludes the record being updated from both
+        checks: it always matches its own current name and fingerprint,
         which is not a collision with itself.
         """
+        key = UPDATE_SAVED_SEARCH_KEY
         saved_search_id = proposal.payload["saved_search_id"]
         change = UpdateChange(**proposal.payload["change"])
 
         try:
             existing = await client.list_saved_searches(token)
         except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            return {key: {"status": "error", "message": str(exc)}}
 
         others = [r for r in existing if r.saved_search_id != saved_search_id]
 
         if change.search_filters is not None:
             duplicate = find_by_fingerprint(others, proposal.fingerprint)
             if duplicate is not None:
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "criteria_already_saved",
-                        "existingName": duplicate.name,
-                    }
-                }
+                return {key: {"status": "criteria_already_saved", "existingName": duplicate.name}}
             # Re-asserted here too, even though propose already checked it --
-            # aligning with save_search's create-confirm branch a few dozen
-            # lines below, which re-runs its own URL/filters check at write
-            # time rather than trusting the propose-time result alone.
+            # aligning with save_search's create-confirm branch, which
+            # re-runs its own URL/filters check at write time rather than
+            # trusting the propose-time result alone.
             if not url_matches_filters(f"?{change.new_search_url_query or ''}", change.search_filters):
                 return {
-                    _ENVELOPE_KEY: {
+                    key: {
                         "status": "invalid",
                         "message": "searchUrl no longer matches searchFilters",
                     }
@@ -497,7 +637,7 @@ def register_tools(
         if change.name is not None:
             name_collision = find_by_name(others, change.name)
             if name_collision is not None:
-                return {_ENVELOPE_KEY: {"status": "name_exists", "existingName": name_collision.name}}
+                return {key: {"status": "name_exists", "existingName": name_collision.name}}
 
         try:
             record = await apply_update(
@@ -513,11 +653,11 @@ def register_tools(
             # URL-precondition refusal, an unmappable searchMode, and an
             # id that has since vanished from the account, in addition to
             # any ordinary upstream/network failure.
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            return {key: {"status": "error", "message": str(exc)}}
 
         result = _record_to_dict(record)
         store.mark_consumed(proposal, result=result)
-        return {_ENVELOPE_KEY: {"status": "ok", **result}}
+        return {key: {"status": "ok", **result}}
 
     @app.tool(name="list_saved_searches")
     async def list_saved_searches(ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
@@ -541,15 +681,15 @@ def register_tools(
         """
         token = bearer_token_from_meta(ctx)
         if token is None:
-            return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
+            return {LIST_SAVED_SEARCHES_KEY: {"status": "sign_in_required"}}
 
         try:
             records = await client.list_saved_searches(token)
         except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            return {LIST_SAVED_SEARCHES_KEY: {"status": "error", "message": str(exc)}}
 
         return {
-            _ENVELOPE_KEY: {
+            LIST_SAVED_SEARCHES_KEY: {
                 "status": "ok",
                 "count": len(records),
                 "savedSearches": [_record_to_dict(r) for r in records],
@@ -561,7 +701,9 @@ def register_tools(
         params: ProposeSavedSearchParams,
         ctx: Context,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Validate a save and stash it for confirmation. Writes nothing upstream.
+        """Validate a NEW save and stash it for confirmation. Writes nothing
+        upstream. Create-only -- see `update_saved_search` to rename, change
+        criteria, or change notification frequency on an EXISTING saved search.
 
         The name is GENERATED by the model, never asked for — this tool
         validates it deterministically (no collision over a fully-paged
@@ -573,19 +715,16 @@ def register_tools(
 
         Returns one of: `ready`, `name_exists`, `name_conflict_create_only`,
         `criteria_already_saved`, `name_needs_regeneration`, `invalid`,
-        `sign_in_required`.
+        `error`, `sign_in_required`.
         """
         token = bearer_token_from_meta(ctx)
         if token is None:
-            return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
-
-        if params.intent == "update_existing":
-            return await _propose_update(params, token)
+            return {PROPOSE_SAVED_SEARCH_KEY: {"status": "sign_in_required"}}
 
         try:
             frequency_to_schedule_interval(params.notificationFrequency)
         except ValueError as exc:
-            return {_ENVELOPE_KEY: {"status": "invalid", "message": str(exc)}}
+            return {PROPOSE_SAVED_SEARCH_KEY: {"status": "invalid", "message": str(exc)}}
 
         if not url_matches_filters(params.searchUrl, params.searchFilters):
             # Failing here, before any HTTP call, tells the user before they
@@ -593,7 +732,7 @@ def register_tools(
             # upstream API performs no such validation and will happily
             # store a contradictory record.
             return {
-                _ENVELOPE_KEY: {
+                PROPOSE_SAVED_SEARCH_KEY: {
                     "status": "invalid",
                     "message": "searchUrl does not match searchFilters",
                 }
@@ -602,7 +741,7 @@ def register_tools(
         try:
             existing = await client.list_saved_searches(token)
         except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+            return {PROPOSE_SAVED_SEARCH_KEY: {"status": "error", "message": str(exc)}}
 
         user_key = user_key_from_token(token)
         fingerprint = criteria_fingerprint(params.searchFilters, params.searchMode)
@@ -612,7 +751,7 @@ def register_tools(
         duplicate = find_by_fingerprint(existing, fingerprint)
         if duplicate is not None:
             return {
-                _ENVELOPE_KEY: {
+                PROPOSE_SAVED_SEARCH_KEY: {
                     "status": "criteria_already_saved",
                     "existingName": duplicate.name,
                 }
@@ -633,7 +772,7 @@ def register_tools(
             ),
         )
         if isinstance(settled, dict):
-            return {_ENVELOPE_KEY: settled}
+            return {PROPOSE_SAVED_SEARCH_KEY: settled}
         final_name, regeneration_attempts = settled
 
         store.clear_naming_attempts(user_key, fingerprint)
@@ -678,7 +817,7 @@ def register_tools(
         }
         if previous_name is not None:
             response["previousName"] = previous_name
-        return {_ENVELOPE_KEY: response}
+        return {PROPOSE_SAVED_SEARCH_KEY: response}
 
     def _resolve_confirmed_proposal(
         proposal_id: str,
@@ -687,18 +826,20 @@ def register_tools(
         confirmed: bool | None,
         expected_actions: tuple[ProposalAction, ...],
         already_done_status: str,
+        envelope_key: str,
     ) -> dict[str, Any] | Proposal:
-        """The confirm-guard sequence shared by `save_search` and `delete_saved_search`.
+        """The confirm-guard sequence shared by `save_search`,
+        `update_saved_search` and `delete_saved_search`.
 
         Returns either an envelope dict the caller should return immediately
         (not confirmed, unknown/expired/foreign id, action mismatch, a
         replay of an already-consumed proposal, or a confirm already in
         flight for this exact proposal), or the validated, now-CLAIMED
-        `Proposal` to proceed with. Factored out so the two writers cannot
-        drift on this sequence independently — they already had (and keep,
+        `Proposal` to proceed with. Factored out so the three writers cannot
+        drift on this sequence independently — each has (and keeps,
         deliberately) one real difference, `already_done_status`
-        (`already_saved` vs `already_deleted`), and the next propose/confirm
-        verb would otherwise need a third hand-copied version with no
+        (`already_saved` / `already_updated` / `already_deleted`), and a
+        fourth writer would otherwise need a hand-copied version with no
         guardrail against getting a step wrong or out of order.
 
         🔴 The `consumed` check and the `store.claim()` call below run with
@@ -706,11 +847,10 @@ def register_tools(
         `ProposalStore.claim`'s docstring. A caller that gets back a
         `Proposal` from this function MUST eventually call either
         `store.mark_consumed` (on success) or `store.release` (on any other
-        return) — see `save_search` / `delete_saved_search`'s `try/finally`
-        around this call.
+        return) — see each writer's `try/finally` around this call.
         """
         if confirmed is not True:
-            return {_ENVELOPE_KEY: {"status": "not_confirmed"}}
+            return {envelope_key: {"status": "not_confirmed"}}
 
         proposal = store.get(proposal_id, user_key)
         if proposal is None:
@@ -718,72 +858,68 @@ def register_tools(
             # into one response -- see ProposalStore.get's docstring for why
             # that collapse is the point. A's proposalId with B's token
             # lands here, indistinguishable from an id that never existed.
-            return {_ENVELOPE_KEY: {"status": "proposal_expired"}}
+            return {envelope_key: {"status": "proposal_expired"}}
 
         if proposal.action not in expected_actions:
-            return {_ENVELOPE_KEY: {"status": "proposal_action_mismatch"}}
+            return {envelope_key: {"status": "proposal_action_mismatch"}}
 
         if proposal.consumed:
             # Idempotent replay: the same proposalId confirmed twice acts
             # once. Returns the ORIGINAL result rather than re-deriving one,
             # so a crashed client retrying its own successful request sees
             # the same outcome it already got.
-            return {_ENVELOPE_KEY: {"status": already_done_status, **(proposal.result or {})}}
+            return {envelope_key: {"status": already_done_status, **(proposal.result or {})}}
 
         if not store.claim(proposal):
             # Another confirm of this exact proposalId is still executing
             # its upstream call -- refuse this one rather than racing it.
-            return {_ENVELOPE_KEY: {"status": "proposal_in_progress"}}
+            return {envelope_key: {"status": "proposal_in_progress"}}
 
         return proposal
 
     @app.tool(name="save_search")
     async def save_search(params: SaveSearchParams, ctx: Context) -> dict[str, Any]:  # type: ignore[type-arg]
-        """The writer for both creates and updates. Input is `{proposalId, confirmed}`.
+        """The writer for a NEW saved search. Input is `{proposalId, confirmed}`.
+        Confirms a `save` proposal only -- see `update_saved_search` to confirm
+        a rename, criteria change, or frequency change, and `delete_saved_search`
+        to confirm a delete.
 
         Every check below is server-enforced and never trusts the model:
         an unconfirmed call writes nothing, an unknown/expired/foreign
         `proposalId` returns `proposal_expired` (never "closest matching
-        pending proposal"), a `delete` proposal returns
+        pending proposal"), a proposal of any other action returns
         `proposal_action_mismatch`, and both duplicate checks re-run
         against LIVE data before this writes anything -- time passes
         between propose and confirm, and a defence that only runs once is a
         defence a future code path can skip.
-
-        Confirms a `save` proposal (step N6) by calling `client.create`, or
-        an `update` proposal (step N7) by running the full six-step update
-        recipe in `vesta_saved_search.updates.apply_update` -- never a
-        two-field passthrough, per that module's full-replace warning.
         """
         token = bearer_token_from_meta(ctx)
         if token is None:
-            return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
+            return {SAVE_SEARCH_KEY: {"status": "sign_in_required"}}
 
         user_key = user_key_from_token(token)
         resolved = _resolve_confirmed_proposal(
             params.proposalId,
             user_key,
             confirmed=params.confirmed,
-            expected_actions=("save", "update"),
+            expected_actions=("save",),
             already_done_status="already_saved",
+            envelope_key=SAVE_SEARCH_KEY,
         )
         if isinstance(resolved, dict):
             return resolved
         proposal = resolved
 
         try:
-            if proposal.action == "update":
-                return await _confirm_update(proposal, token)
-
             try:
                 existing = await client.list_saved_searches(token)
             except SavedSearchApiError as exc:
-                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+                return {SAVE_SEARCH_KEY: {"status": "error", "message": str(exc)}}
 
             duplicate = find_by_fingerprint(existing, proposal.fingerprint)
             if duplicate is not None:
                 return {
-                    _ENVELOPE_KEY: {
+                    SAVE_SEARCH_KEY: {
                         "status": "criteria_already_saved",
                         "existingName": duplicate.name,
                     }
@@ -791,12 +927,12 @@ def register_tools(
 
             name_collision = find_by_name(existing, proposal.name)
             if name_collision is not None:
-                return {_ENVELOPE_KEY: {"status": "name_exists", "existingName": name_collision.name}}
+                return {SAVE_SEARCH_KEY: {"status": "name_exists", "existingName": name_collision.name}}
 
             payload = proposal.payload
             if not url_matches_filters(payload["search_url"], payload["search_filters"]):
                 return {
-                    _ENVELOPE_KEY: {
+                    SAVE_SEARCH_KEY: {
                         "status": "invalid",
                         "message": "searchUrl no longer matches searchFilters",
                     }
@@ -815,16 +951,16 @@ def register_tools(
                 # The free backstop: verified to key on name only, so this can
                 # fire even if our own client-side check above somehow missed
                 # it. Mapped to the same clean message rather than a raw 400.
-                return {_ENVELOPE_KEY: {"status": "name_exists"}}
+                return {SAVE_SEARCH_KEY: {"status": "name_exists"}}
             except SavedSearchApiError as exc:
                 # Never a success status for an upstream failure -- a bare
                 # exception here would otherwise crash the tool call instead of
                 # answering "couldn't save right now".
-                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+                return {SAVE_SEARCH_KEY: {"status": "error", "message": str(exc)}}
 
             result = _record_to_dict(record)
             store.mark_consumed(proposal, result=result)
-            return {_ENVELOPE_KEY: {"status": "ok", **result}}
+            return {SAVE_SEARCH_KEY: {"status": "ok", **result}}
         finally:
             # Every return above except the `mark_consumed` one falls
             # through to here with `proposal.consumed` still `False` --
@@ -833,80 +969,67 @@ def register_tools(
             if not proposal.consumed:
                 store.release(proposal)
 
-    @app.tool(name="update_saved_search_notifications")
-    async def update_saved_search_notifications(
-        params: UpdateSavedSearchNotificationsParams,
+    @app.tool(name="update_saved_search")
+    async def update_saved_search(
+        params: UpdateSavedSearchParams,
         ctx: Context,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Propose a frequency-only change. Still confirmed via `save_search`.
+        """Propose, then confirm, a rename, a criteria change, and/or a
+        notification-frequency change on an EXISTING saved search. Never a
+        one-shot on first mention -- every change still goes through the
+        confirm-then-write pattern every other write here uses.
 
-        Cannot be a two-field passthrough to the API — full-replace
+        Two shapes -- see `UpdateSavedSearchParams`. PROPOSE (`savedSearchId`
+        + at least one change) writes nothing and returns a `proposalId`.
+        CONFIRM (`proposalId` + `confirmed: true`) executes it,
+        server-enforced the same way `save_search` enforces a create: an
+        unconfirmed call writes nothing, an unknown/expired/foreign id
+        returns `proposal_expired`, and a `save`-or-`delete` proposal
+        presented here returns `proposal_action_mismatch`.
+
+        A rename and a criteria change can never be combined in one call --
+        the confirmation summary the user approves must describe exactly one
+        thing. `notificationFrequency` may ride along with either.
+
+        A change that is already true of the stored record (e.g. setting an
+        already-Daily search to Daily again) returns `no_change` rather than
+        proposing a no-op write.
+
+        Also covers what a prior version of this server exposed as a
+        separate `update_saved_search_notifications` tool -- a
+        frequency-only call needs only `savedSearchId` + `notificationFrequency`.
+        It still cannot be a two-field passthrough to the API: full-replace
         semantics mean every OTHER field must be resent on write, so this
         runs through the exact same six-step recipe as any other update
-        (`vesta_saved_search.updates.apply_update`); it just supplies only a
-        frequency to change. A frequency edit is still a change to the
-        user's data, and full-replace means a bug here could silently reset
-        other fields, so it does not get to skip confirmation.
+        (`vesta_saved_search.updates.apply_update`).
         """
         token = bearer_token_from_meta(ctx)
         if token is None:
-            return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
+            return {UPDATE_SAVED_SEARCH_KEY: {"status": "sign_in_required"}}
 
-        try:
-            frequency_to_schedule_interval(params.notificationFrequency)
-        except ValueError as exc:
-            return {_ENVELOPE_KEY: {"status": "invalid", "message": str(exc)}}
+        if params.savedSearchId is not None:
+            return await _propose_update(params, token)
 
-        try:
-            existing = await client.list_saved_searches(token)
-        except SavedSearchApiError as exc:
-            return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
-
-        current = next((r for r in existing if r.saved_search_id == params.savedSearchId), None)
-        if current is None:
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": f"no saved search with id {params.savedSearchId}",
-                }
-            }
-
-        try:
-            # A frequency-only change never touches criteria, so
-            # `apply_update`'s step 4 always maps `current.search_mode` for
-            # this path (never the caller-supplied `fresh_es_query` branch)
-            # -- see `_propose_update`'s identical check for why this must
-            # fail fast, at propose time, rather than only at confirm.
-            search_mode_for_es_query(current.search_mode)
-        except SavedSearchApiError as exc:
-            return {
-                _ENVELOPE_KEY: {
-                    "status": "invalid",
-                    "message": f"cannot update this saved search: {exc}",
-                }
-            }
-
+        # Confirm shape: proposalId + confirmed. The params validator
+        # guarantees proposalId is set whenever savedSearchId is not.
         user_key = user_key_from_token(token)
-        fingerprint = criteria_fingerprint(current.search_filters, current.search_mode)
-        proposal = store.put(
+        resolved = _resolve_confirmed_proposal(
+            params.proposalId,  # type: ignore[arg-type]
             user_key,
-            action="update",
-            payload={
-                "saved_search_id": params.savedSearchId,
-                "change": {"notification_frequency": params.notificationFrequency},
-            },
-            name=current.name,
-            fingerprint=fingerprint,
+            confirmed=params.confirmed,
+            expected_actions=("update",),
+            already_done_status="already_updated",
+            envelope_key=UPDATE_SAVED_SEARCH_KEY,
         )
-        return {
-            _ENVELOPE_KEY: {
-                "status": "ready",
-                "proposalId": proposal.proposal_id,
-                "savedSearchId": params.savedSearchId,
-                "name": current.name,
-                "notificationFrequency": params.notificationFrequency,
-            }
-        }
+        if isinstance(resolved, dict):
+            return resolved
+        proposal = resolved
+
+        try:
+            return await _confirm_update(proposal, token)
+        finally:
+            if not proposal.consumed:
+                store.release(proposal)
 
     @app.tool(name="delete_saved_search")
     async def delete_saved_search(
@@ -932,24 +1055,17 @@ def register_tools(
         """
         token = bearer_token_from_meta(ctx)
         if token is None:
-            return {_ENVELOPE_KEY: {"status": "sign_in_required"}}
+            return {DELETE_SAVED_SEARCH_KEY: {"status": "sign_in_required"}}
 
         user_key = user_key_from_token(token)
 
         if params.savedSearchId is not None:
-            try:
-                existing = await client.list_saved_searches(token)
-            except SavedSearchApiError as exc:
-                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
-
-            current = next((r for r in existing if r.saved_search_id == params.savedSearchId), None)
-            if current is None:
-                return {
-                    _ENVELOPE_KEY: {
-                        "status": "invalid",
-                        "message": f"no saved search with id {params.savedSearchId}",
-                    }
-                }
+            found = await _find_record_or_invalid(
+                params.savedSearchId, token, envelope_key=DELETE_SAVED_SEARCH_KEY
+            )
+            if isinstance(found, dict):
+                return found
+            _existing, current = found
 
             new_proposal = store.put(
                 user_key,
@@ -959,7 +1075,7 @@ def register_tools(
                 fingerprint=criteria_fingerprint(current.search_filters, current.search_mode),
             )
             return {
-                _ENVELOPE_KEY: {
+                DELETE_SAVED_SEARCH_KEY: {
                     "status": "ready",
                     "proposalId": new_proposal.proposal_id,
                     "savedSearchId": params.savedSearchId,
@@ -971,7 +1087,7 @@ def register_tools(
         # guarantees proposalId is set whenever savedSearchId is not.
         proposal_id = params.proposalId
         if proposal_id is None:  # pragma: no cover - unreachable, guarded by the model validator
-            return {_ENVELOPE_KEY: {"status": "invalid", "message": "proposalId is required"}}
+            return {DELETE_SAVED_SEARCH_KEY: {"status": "invalid", "message": "proposalId is required"}}
 
         resolved = _resolve_confirmed_proposal(
             proposal_id,
@@ -979,6 +1095,7 @@ def register_tools(
             confirmed=params.confirmed,
             expected_actions=("delete",),
             already_done_status="already_deleted",
+            envelope_key=DELETE_SAVED_SEARCH_KEY,
         )
         if isinstance(resolved, dict):
             return resolved
@@ -989,14 +1106,23 @@ def register_tools(
             try:
                 await client.delete(token, saved_search_id)
             except SavedSearchApiError as exc:
-                return {_ENVELOPE_KEY: {"status": "error", "message": str(exc)}}
+                return {DELETE_SAVED_SEARCH_KEY: {"status": "error", "message": str(exc)}}
 
             result = {"savedSearchId": saved_search_id}
             store.mark_consumed(stashed_proposal, result=result)
-            return {_ENVELOPE_KEY: {"status": "ok", **result}}
+            return {DELETE_SAVED_SEARCH_KEY: {"status": "ok", **result}}
         finally:
             if not stashed_proposal.consumed:
                 store.release(stashed_proposal)
 
 
-__all__ = ["register_tools"]
+__all__ = [
+    "DELETE_SAVED_SEARCH_KEY",
+    "LIST_SAVED_SEARCHES_KEY",
+    "PROPOSAL_FIELD_NAMES",
+    "PROPOSE_SAVED_SEARCH_KEY",
+    "RECORD_FIELD_NAMES",
+    "SAVE_SEARCH_KEY",
+    "UPDATE_SAVED_SEARCH_KEY",
+    "register_tools",
+]

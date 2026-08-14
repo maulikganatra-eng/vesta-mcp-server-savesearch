@@ -56,11 +56,11 @@ class UpdateChange:
 
     Exactly one concern is expected to be set per call — a rename (`name`),
     a frequency change (`notification_frequency`), or a criteria change
-    (`search_filters` + `fresh_es_query` + `new_search_url_query` together).
-    Nothing here enforces that exclusivity; it is a convention every current
-    caller (`save_search`'s update branch, `update_saved_search_notifications`)
-    follows because the tools built on top of this module each expose only
-    one kind of change to the user in a single confirmation.
+    (`search_filters` + `fresh_es_query` + `new_search_url_query` together)
+    — though a frequency change may ride alongside either of the other two.
+    Nothing here enforces the name/criteria exclusivity; that is enforced one
+    layer up, in `update_saved_search`'s own params validator and propose
+    logic (`tools.py`), which is the only caller of `apply_update` today.
     """
 
     name: str | None = None
