@@ -200,7 +200,13 @@ def fallback_name(
     return candidate[:max_length]
 
 
-def dedupe_fallback_name(name: str, records: list[SavedSearchRecord], *, max_length: int) -> str:
+def dedupe_fallback_name(
+    name: str,
+    records: list[SavedSearchRecord],
+    *,
+    max_length: int,
+    avoid_names: tuple[str, ...] = (),
+) -> str:
     """Disambiguate `name` against `records` by appending a numeric suffix.
 
     Only reached after two regeneration attempts already failed and
@@ -210,8 +216,19 @@ def dedupe_fallback_name(name: str, records: list[SavedSearchRecord], *, max_len
     fallback), append the smallest ` (N)` suffix that clears the collision
     now, at propose time, instead of returning `status: ready` with a name
     that would only fail later, at confirm time, as `name_exists`.
+
+    `avoid_names` covers names that are not in `records` at all -- namely,
+    an update's OWN current name, which `update_saved_search` deliberately
+    excludes from `records` (it is not a collision with a DIFFERENT search)
+    but which this fallback must still not coincidentally reproduce, or a
+    genuine rename would silently collapse into a no-op.
     """
-    if find_by_name(records, name) is None:
+    avoid = {normalise_name(n) for n in avoid_names}
+
+    def _taken(candidate: str) -> bool:
+        return find_by_name(records, candidate) is not None or normalise_name(candidate) in avoid
+
+    if not _taken(name):
         return name
     suffix_n = 2
     while True:
@@ -221,7 +238,7 @@ def dedupe_fallback_name(name: str, records: list[SavedSearchRecord], *, max_len
         # non-crashing) name if `max_length` is ever configured small
         # enough that a multi-digit suffix (e.g. " (10)") would overrun it.
         candidate = name[: max(0, max_length - len(suffix))] + suffix
-        if find_by_name(records, candidate) is None:
+        if not _taken(candidate):
             return candidate
         suffix_n += 1
 

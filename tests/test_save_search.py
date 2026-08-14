@@ -21,7 +21,7 @@ from vesta_saved_search.errors import SavedSearchNameExistsError, SavedSearchUps
 from vesta_saved_search.fingerprint import criteria_fingerprint
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.proposals import ProposalStore, user_key_from_token
-from vesta_saved_search.tools import SaveSearchParams, register_tools
+from vesta_saved_search.tools import SAVE_SEARCH_KEY, SaveSearchParams, register_tools
 
 pytestmark = pytest.mark.unit
 
@@ -116,7 +116,7 @@ async def test_anonymous_caller_gets_sign_in_required() -> None:
 
     result = await _save(app, SaveSearchParams(proposalId="x", confirmed=True), _FakeCtx(None))
 
-    assert result == {"saved_search": {"status": "sign_in_required"}}
+    assert result == {SAVE_SEARCH_KEY: {"status": "sign_in_required"}}
     client.create.assert_not_called()
 
 
@@ -130,7 +130,7 @@ async def test_unconfirmed_call_writes_nothing() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=False), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "not_confirmed"
+    assert result[SAVE_SEARCH_KEY]["status"] == "not_confirmed"
     client.create.assert_not_called()
 
 
@@ -142,7 +142,7 @@ async def test_unknown_proposal_id_returns_proposal_expired() -> None:
         app, SaveSearchParams(proposalId="does-not-exist", confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "proposal_expired"
+    assert result[SAVE_SEARCH_KEY]["status"] == "proposal_expired"
     client.create.assert_not_called()
 
 
@@ -161,7 +161,7 @@ async def test_a_proposal_id_presented_with_another_users_token_is_refused() -> 
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_B)
     )
 
-    assert result["saved_search"]["status"] == "proposal_expired"
+    assert result[SAVE_SEARCH_KEY]["status"] == "proposal_expired"
     client.create.assert_not_called()
 
 
@@ -175,7 +175,7 @@ async def test_a_delete_proposal_returns_action_mismatch() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "proposal_action_mismatch"
+    assert result[SAVE_SEARCH_KEY]["status"] == "proposal_action_mismatch"
     client.create.assert_not_called()
 
 
@@ -192,8 +192,8 @@ async def test_confirmed_save_writes_exactly_once() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "ok"
-    assert result["saved_search"]["savedSearchId"] == 99
+    assert result[SAVE_SEARCH_KEY]["status"] == "ok"
+    assert result[SAVE_SEARCH_KEY]["savedSearchId"] == 99
     client.create.assert_awaited_once()
 
 
@@ -210,9 +210,9 @@ async def test_confirming_twice_writes_once_and_replay_returns_already_saved() -
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert first["saved_search"]["status"] == "ok"
-    assert second["saved_search"]["status"] == "already_saved"
-    assert second["saved_search"]["savedSearchId"] == 99
+    assert first[SAVE_SEARCH_KEY]["status"] == "ok"
+    assert second[SAVE_SEARCH_KEY]["status"] == "already_saved"
+    assert second[SAVE_SEARCH_KEY]["savedSearchId"] == 99
     client.create.assert_awaited_once()
 
 
@@ -229,8 +229,8 @@ async def test_live_duplicate_criteria_check_re_runs_at_write_time() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "criteria_already_saved"
-    assert result["saved_search"]["existingName"] == "A Newer Duplicate"
+    assert result[SAVE_SEARCH_KEY]["status"] == "criteria_already_saved"
+    assert result[SAVE_SEARCH_KEY]["existingName"] == "A Newer Duplicate"
     client.create.assert_not_called()
 
 
@@ -245,7 +245,7 @@ async def test_live_name_collision_check_re_runs_at_write_time() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "name_exists"
+    assert result[SAVE_SEARCH_KEY]["status"] == "name_exists"
     client.create.assert_not_called()
 
 
@@ -262,7 +262,7 @@ async def test_list_failure_at_write_time_becomes_an_error_envelope() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[SAVE_SEARCH_KEY]["status"] == "error"
     client.create.assert_not_called()
 
 
@@ -292,7 +292,7 @@ async def test_stashed_url_no_longer_matching_filters_is_refused_at_write_time()
         app, SaveSearchParams(proposalId=proposal.proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[SAVE_SEARCH_KEY]["status"] == "invalid"
     client.create.assert_not_called()
 
 
@@ -309,7 +309,7 @@ async def test_upstream_name_exists_backstop_is_mapped_cleanly() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "name_exists"
+    assert result[SAVE_SEARCH_KEY]["status"] == "name_exists"
 
 
 async def test_upstream_5xx_never_produces_a_success_status() -> None:
@@ -323,7 +323,7 @@ async def test_upstream_5xx_never_produces_a_success_status() -> None:
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[SAVE_SEARCH_KEY]["status"] == "error"
 
 
 async def test_concurrent_confirms_of_the_same_proposal_write_exactly_once() -> None:
@@ -356,12 +356,12 @@ async def test_concurrent_confirms_of_the_same_proposal_write_exactly_once() -> 
     await asyncio.sleep(0)  # let task 1 run until it blocks inside client.create
 
     result2 = await _save(app, params, _FakeCtx(TOKEN_A))
-    assert result2["saved_search"]["status"] == "proposal_in_progress"
+    assert result2[SAVE_SEARCH_KEY]["status"] == "proposal_in_progress"
 
     release_upstream.set()
     result1 = await task1
 
-    assert result1["saved_search"]["status"] == "ok"
+    assert result1[SAVE_SEARCH_KEY]["status"] == "ok"
     client.create.assert_awaited_once()
 
 
@@ -376,12 +376,12 @@ async def test_a_released_claim_allows_a_legitimate_retry() -> None:
     app = _app_with(client, store)
 
     first = await _save(app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A))
-    assert first["saved_search"]["status"] == "name_exists"
+    assert first[SAVE_SEARCH_KEY]["status"] == "name_exists"
 
     second = await _save(
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
-    assert second["saved_search"]["status"] == "name_exists"
+    assert second[SAVE_SEARCH_KEY]["status"] == "name_exists"
     client.create.assert_not_called()
 
 
@@ -395,4 +395,4 @@ async def test_envelope_has_exactly_one_top_level_key_on_every_branch() -> None:
     result = await _save(
         app, SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
-    assert list(result.keys()) == ["saved_search"]
+    assert list(result.keys()) == [SAVE_SEARCH_KEY]

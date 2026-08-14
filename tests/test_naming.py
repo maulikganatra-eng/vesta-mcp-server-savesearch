@@ -216,6 +216,25 @@ def test_dedupe_fallback_name_tries_suffixes_in_order() -> None:
     assert dedupe_fallback_name("X Search", records, max_length=60) == "X Search (2)"
 
 
+def test_dedupe_fallback_name_avoids_names_not_present_in_records() -> None:
+    """🔴 `avoid_names` covers names that are not a collision with any OTHER
+    record -- namely `update_saved_search`'s own current name, which the
+    caller deliberately excludes from `records` (it is not a collision with
+    a DIFFERENT search). Without this, the deterministic fallback could
+    coincidentally reproduce the record's own unchanged name, silently
+    collapsing an intended rename into a no-op."""
+    result = dedupe_fallback_name("Del Mar Search", [], max_length=60, avoid_names=("Del Mar Search",))
+    assert result == "Del Mar Search (2)"
+
+
+def test_dedupe_fallback_name_avoid_names_combines_with_records() -> None:
+    records = [_record(name="Del Mar Search (2)")]
+    result = dedupe_fallback_name(
+        "Del Mar Search", records, max_length=60, avoid_names=("Del Mar Search",)
+    )
+    assert result == "Del Mar Search (3)"
+
+
 def test_dedupe_fallback_name_clamps_rather_than_uses_a_negative_slice() -> None:
     """🔴 name[:max_length - len(suffix)] goes negative (and silently slices
     from the wrong end instead of raising) once a multi-digit suffix like

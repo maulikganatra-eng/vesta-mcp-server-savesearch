@@ -13,7 +13,7 @@ from vesta_saved_search.client import SavedSearchClient
 from vesta_saved_search.errors import SavedSearchUpstreamError
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.proposals import ProposalStore, user_key_from_token
-from vesta_saved_search.tools import DeleteSavedSearchParams, register_tools
+from vesta_saved_search.tools import DELETE_SAVED_SEARCH_KEY, DeleteSavedSearchParams, register_tools
 
 pytestmark = pytest.mark.unit
 
@@ -88,7 +88,7 @@ async def test_anonymous_caller_gets_sign_in_required() -> None:
 
     result = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(None))
 
-    assert result["saved_search"]["status"] == "sign_in_required"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "sign_in_required"
     client.delete.assert_not_called()
 
 
@@ -99,7 +99,7 @@ async def test_propose_list_error_becomes_an_error_envelope() -> None:
 
     result = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "error"
 
 
 async def test_propose_writes_nothing_and_returns_a_proposal_id() -> None:
@@ -109,9 +109,9 @@ async def test_propose_writes_nothing_and_returns_a_proposal_id() -> None:
 
     result = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
 
-    assert result["saved_search"]["status"] == "ready"
-    assert result["saved_search"]["proposalId"]
-    assert result["saved_search"]["name"] == "Del Mar Homes"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "ready"
+    assert result[DELETE_SAVED_SEARCH_KEY]["proposalId"]
+    assert result[DELETE_SAVED_SEARCH_KEY]["name"] == "Del Mar Homes"
     client.delete.assert_not_called()
 
 
@@ -121,7 +121,7 @@ async def test_propose_unknown_id_is_invalid() -> None:
 
     result = await _delete(app, DeleteSavedSearchParams(savedSearchId=999), _FakeCtx(TOKEN_A))
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "invalid"
 
 
 async def test_delete_is_never_a_one_shot_on_first_mention() -> None:
@@ -142,13 +142,13 @@ async def test_unconfirmed_confirm_call_writes_nothing() -> None:
     app = _app_with(client, store)
 
     proposed = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    proposal_id = proposed["saved_search"]["proposalId"]
+    proposal_id = proposed[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     result = await _delete(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=False), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "not_confirmed"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "not_confirmed"
     client.delete.assert_not_called()
 
 
@@ -159,14 +159,14 @@ async def test_confirmed_delete_calls_client_delete_exactly_once() -> None:
     app = _app_with(client, store)
 
     proposed = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    proposal_id = proposed["saved_search"]["proposalId"]
+    proposal_id = proposed[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     result = await _delete(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "ok"
-    assert result["saved_search"]["savedSearchId"] == 42
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "ok"
+    assert result[DELETE_SAVED_SEARCH_KEY]["savedSearchId"] == 42
     client.delete.assert_awaited_once_with(TOKEN_A, 42)
 
 
@@ -177,7 +177,7 @@ async def test_confirming_twice_deletes_once_and_replay_returns_already_deleted(
     app = _app_with(client, store)
 
     proposed = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    proposal_id = proposed["saved_search"]["proposalId"]
+    proposal_id = proposed[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     first = await _delete(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
@@ -186,8 +186,8 @@ async def test_confirming_twice_deletes_once_and_replay_returns_already_deleted(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert first["saved_search"]["status"] == "ok"
-    assert second["saved_search"]["status"] == "already_deleted"
+    assert first[DELETE_SAVED_SEARCH_KEY]["status"] == "ok"
+    assert second[DELETE_SAVED_SEARCH_KEY]["status"] == "already_deleted"
     client.delete.assert_awaited_once()
 
 
@@ -218,7 +218,7 @@ async def test_a_save_proposal_passed_here_returns_action_mismatch() -> None:
         _FakeCtx(TOKEN_A),
     )
 
-    assert result["saved_search"]["status"] == "proposal_action_mismatch"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "proposal_action_mismatch"
     client.delete.assert_not_called()
 
 
@@ -229,13 +229,13 @@ async def test_a_delete_proposal_id_is_refused_with_another_users_token() -> Non
     app = _app_with(client, store)
 
     proposed = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    proposal_id = proposed["saved_search"]["proposalId"]
+    proposal_id = proposed[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     result = await _delete(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_B)
     )
 
-    assert result["saved_search"]["status"] == "proposal_expired"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "proposal_expired"
     client.delete.assert_not_called()
 
 
@@ -247,13 +247,13 @@ async def test_deleting_an_already_gone_record_is_a_clean_error_not_a_crash() ->
     app = _app_with(client, store)
 
     proposed = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    proposal_id = proposed["saved_search"]["proposalId"]
+    proposal_id = proposed[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     result = await _delete(
         app, DeleteSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN_A)
     )
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "error"
 
 
 async def test_ordering_propose_save_then_propose_delete_leaves_save_unexecutable() -> None:
@@ -280,7 +280,7 @@ async def test_ordering_propose_save_then_propose_delete_leaves_save_unexecutabl
     app = _app_with(client, store)
 
     proposed_delete = await _delete(app, DeleteSavedSearchParams(savedSearchId=42), _FakeCtx(TOKEN_A))
-    delete_proposal_id = proposed_delete["saved_search"]["proposalId"]
+    delete_proposal_id = proposed_delete[DELETE_SAVED_SEARCH_KEY]["proposalId"]
 
     # The save proposal is gone -- superseded, not just "not current".
     assert store.get(save_proposal.proposal_id, user_key) is None
@@ -291,6 +291,6 @@ async def test_ordering_propose_save_then_propose_delete_leaves_save_unexecutabl
         _FakeCtx(TOKEN_A),
     )
 
-    assert result["saved_search"]["status"] == "ok"
+    assert result[DELETE_SAVED_SEARCH_KEY]["status"] == "ok"
     client.delete.assert_awaited_once_with(TOKEN_A, 42)
     client.create.assert_not_called()
