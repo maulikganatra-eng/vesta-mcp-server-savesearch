@@ -17,7 +17,7 @@ import pytest
 from vesta_saved_search.client import SavedSearchClient
 from vesta_saved_search.errors import SavedSearchUpstreamError
 from vesta_saved_search.models import SavedSearchRecord
-from vesta_saved_search.tools import register_tools
+from vesta_saved_search.tools import LIST_SAVED_SEARCHES_KEY, register_tools
 
 pytestmark = pytest.mark.unit
 
@@ -95,7 +95,7 @@ async def test_anonymous_caller_gets_sign_in_required_without_calling_the_client
 
     result = await _call_list_saved_searches(app, _FakeCtx(token=None))
 
-    assert result == {"saved_search": {"status": "sign_in_required"}}
+    assert result == {LIST_SAVED_SEARCHES_KEY: {"status": "sign_in_required"}}
     client.list_saved_searches.assert_not_called()
 
 
@@ -106,7 +106,7 @@ async def test_empty_account_returns_zero_count_not_an_error() -> None:
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    assert result == {"saved_search": {"status": "ok", "count": 0, "savedSearches": []}}
+    assert result == {LIST_SAVED_SEARCHES_KEY: {"status": "ok", "count": 0, "savedSearches": []}}
 
 
 async def test_records_are_shaped_with_every_documented_field() -> None:
@@ -116,7 +116,7 @@ async def test_records_are_shaped_with_every_documented_field() -> None:
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    body = result["saved_search"]
+    body = result[LIST_SAVED_SEARCHES_KEY]
     assert body["status"] == "ok"
     assert body["count"] == 1
     record = body["savedSearches"][0]
@@ -141,7 +141,7 @@ async def test_search_url_present_on_every_record_even_if_empty_string() -> None
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    record = result["saved_search"]["savedSearches"][0]
+    record = result[LIST_SAVED_SEARCHES_KEY]["savedSearches"][0]
     assert "searchUrl" in record
     assert record["searchUrl"] == ""
 
@@ -153,7 +153,7 @@ async def test_frequency_renders_as_the_friendly_word_not_the_raw_pair() -> None
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    record = result["saved_search"]["savedSearches"][0]
+    record = result[LIST_SAVED_SEARCHES_KEY]["savedSearches"][0]
     assert record["notificationFrequency"] == "instantly"
 
 
@@ -167,8 +167,8 @@ async def test_client_error_becomes_an_error_envelope_not_an_exception() -> None
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    assert result["saved_search"]["status"] == "error"
-    assert "upstream is down" in result["saved_search"]["message"]
+    assert result[LIST_SAVED_SEARCHES_KEY]["status"] == "error"
+    assert "upstream is down" in result[LIST_SAVED_SEARCHES_KEY]["message"]
 
 
 async def test_envelope_has_exactly_one_top_level_key() -> None:
@@ -184,18 +184,18 @@ async def test_envelope_has_exactly_one_top_level_key() -> None:
 
     result = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
 
-    assert list(result.keys()) == ["saved_search"]
+    assert list(result.keys()) == [LIST_SAVED_SEARCHES_KEY]
 
 
 async def test_sign_in_required_and_error_envelopes_also_have_one_top_level_key() -> None:
     client = AsyncMock(spec=SavedSearchClient)
     app = _app_with_mocked_client(client)
     anonymous = await _call_list_saved_searches(app, _FakeCtx(token=None))
-    assert list(anonymous.keys()) == ["saved_search"]
+    assert list(anonymous.keys()) == [LIST_SAVED_SEARCHES_KEY]
 
     client.list_saved_searches.side_effect = SavedSearchUpstreamError("down")
     errored = await _call_list_saved_searches(app, _FakeCtx(token="tok"))
-    assert list(errored.keys()) == ["saved_search"]
+    assert list(errored.keys()) == [LIST_SAVED_SEARCHES_KEY]
 
 
 def test_tool_schema_has_no_user_id_parameter() -> None:

@@ -3,6 +3,10 @@ against a mocked client. Every test here also asserts `client.create` was
 never called -- this tool writes nothing upstream, by construction, and that
 must hold across every branch, not just the obviously-safe ones.
 
+Create-only: renaming, changing criteria, or changing notification frequency
+on an EXISTING saved search is `update_saved_search`'s job -- see
+tests/test_propose_update.py.
+
 The protocol-level cross-user proof lives in
 tests/test_component_save_flow.py.
 """
@@ -20,7 +24,7 @@ from vesta_saved_search.errors import SavedSearchUpstreamError
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.naming import fallback_name
 from vesta_saved_search.proposals import ProposalStore, user_key_from_token
-from vesta_saved_search.tools import ProposeSavedSearchParams, register_tools
+from vesta_saved_search.tools import PROPOSE_SAVED_SEARCH_KEY, ProposeSavedSearchParams, register_tools
 
 pytestmark = pytest.mark.unit
 
@@ -71,7 +75,6 @@ def _params(**overrides: Any) -> ProposeSavedSearchParams:
         "unsupportedFilters": [],
         "notificationFrequency": "never",
         "intent": "auto",
-        "savedSearchId": None,
     }
     defaults.update(overrides)
     return ProposeSavedSearchParams(**defaults)
@@ -102,23 +105,7 @@ async def test_anonymous_caller_gets_sign_in_required() -> None:
 
     result = await _propose(app, _params(), _FakeCtx(token=None))
 
-    assert result == {"saved_search": {"status": "sign_in_required"}}
-    client.list_saved_searches.assert_not_called()
-    client.create.assert_not_called()
-
-
-async def test_update_existing_without_a_saved_search_id_is_invalid() -> None:
-    """N7 unlocked `intent=update_existing`, but `savedSearchId` is still
-    required to identify which record is being changed -- see
-    tests/test_propose_update.py for the full update-proposal behaviour."""
-    client = _client()
-    app = _app_with(client, ProposalStore())
-
-    result = await _propose(
-        app, _params(intent="update_existing", savedSearchId=None), _FakeCtx(token=TOKEN)
-    )
-
-    assert result["saved_search"]["status"] == "invalid"
+    assert result == {PROPOSE_SAVED_SEARCH_KEY: {"status": "sign_in_required"}}
     client.list_saved_searches.assert_not_called()
     client.create.assert_not_called()
 
@@ -129,7 +116,7 @@ async def test_out_of_range_frequency_never_reaches_the_http_layer() -> None:
 
     result = await _propose(app, _params(notificationFrequency="weekly"), _FakeCtx(token=TOKEN))
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "invalid"
     client.list_saved_searches.assert_not_called()
     client.create.assert_not_called()
 
@@ -146,7 +133,7 @@ async def test_url_inconsistent_with_filters_is_refused_before_any_http_call() -
         _FakeCtx(token=TOKEN),
     )
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "invalid"
     client.list_saved_searches.assert_not_called()
     client.create.assert_not_called()
 
@@ -159,8 +146,8 @@ async def test_criteria_already_saved_takes_precedence_over_name_exists() -> Non
 
     result = await _propose(app, _params(), _FakeCtx(token=TOKEN))
 
-    assert result["saved_search"]["status"] == "criteria_already_saved"
-    assert result["saved_search"]["existingName"] == "Del Mar Homes"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "criteria_already_saved"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["existingName"] == "Del Mar Homes"
     client.create.assert_not_called()
 
 
@@ -171,8 +158,8 @@ async def test_criteria_already_saved_names_the_existing_search() -> None:
 
     result = await _propose(app, _params(name="Totally Different Name"), _FakeCtx(token=TOKEN))
 
-    assert result["saved_search"]["status"] == "criteria_already_saved"
-    assert result["saved_search"]["existingName"] == "My Malibu Search"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "criteria_already_saved"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["existingName"] == "My Malibu Search"
 
 
 async def test_user_stated_name_collision_asks_name_exists() -> None:
@@ -184,7 +171,7 @@ async def test_user_stated_name_collision_asks_name_exists() -> None:
         app, _params(name="Del Mar Homes", nameWasGenerated=False), _FakeCtx(token=TOKEN)
     )
 
-    assert result["saved_search"]["status"] == "name_exists"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_exists"
     client.create.assert_not_called()
 
 
@@ -199,8 +186,8 @@ async def test_generated_name_collision_never_asks_the_user() -> None:
         app, _params(name="Del Mar Homes", nameWasGenerated=True), _FakeCtx(token=TOKEN)
     )
 
-    assert result["saved_search"]["status"] == "name_needs_regeneration"
-    assert result["saved_search"]["status"] != "name_exists"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_needs_regeneration"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] != "name_exists"
     client.create.assert_not_called()
 
 
@@ -215,7 +202,7 @@ async def test_intent_create_new_with_existing_user_stated_name_is_refused() -> 
         _FakeCtx(token=TOKEN),
     )
 
-    assert result["saved_search"]["status"] == "name_conflict_create_only"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_conflict_create_only"
     client.create.assert_not_called()
 
 
@@ -230,7 +217,7 @@ async def test_two_consecutive_generated_name_collisions_trigger_the_fallback() 
     first = await _propose(
         app, _params(name="Del Mar Homes", nameWasGenerated=True), _FakeCtx(token=TOKEN)
     )
-    assert first["saved_search"]["status"] == "name_needs_regeneration"
+    assert first[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_needs_regeneration"
 
     second = await _propose(
         app,
@@ -241,9 +228,9 @@ async def test_two_consecutive_generated_name_collisions_trigger_the_fallback() 
         _FakeCtx(token=TOKEN),
     )
 
-    assert second["saved_search"]["status"] == "ready"
+    assert second[PROPOSE_SAVED_SEARCH_KEY]["status"] == "ready"
     expected = fallback_name("Del Mar, for sale", max_length=60)
-    assert second["saved_search"]["name"] == expected
+    assert second[PROPOSE_SAVED_SEARCH_KEY]["name"] == expected
     client.create.assert_not_called()
 
 
@@ -263,7 +250,7 @@ async def test_generated_name_mentioning_unsupported_filter_needs_regeneration()
         _FakeCtx(token=TOKEN),
     )
 
-    assert result["saved_search"]["status"] == "name_needs_regeneration"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_needs_regeneration"
     client.create.assert_not_called()
 
 
@@ -278,11 +265,11 @@ async def test_two_consecutive_unsupported_mentions_also_fall_back() -> None:
         unsupportedFilters=["home theater"],
     )
     first = await _propose(app, params, _FakeCtx(token=TOKEN))
-    assert first["saved_search"]["status"] == "name_needs_regeneration"
+    assert first[PROPOSE_SAVED_SEARCH_KEY]["status"] == "name_needs_regeneration"
 
     second = await _propose(app, params, _FakeCtx(token=TOKEN))
-    assert second["saved_search"]["status"] == "ready"
-    assert "theater" not in second["saved_search"]["name"].lower()
+    assert second[PROPOSE_SAVED_SEARCH_KEY]["status"] == "ready"
+    assert "theater" not in second[PROPOSE_SAVED_SEARCH_KEY]["name"].lower()
 
 
 async def test_user_stated_name_over_length_limit_is_invalid_not_regenerated() -> None:
@@ -295,7 +282,7 @@ async def test_user_stated_name_over_length_limit_is_invalid_not_regenerated() -
         _FakeCtx(token=TOKEN),
     )
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "invalid"
     client.create.assert_not_called()
 
 
@@ -305,7 +292,7 @@ async def test_ready_response_carries_a_proposal_id_and_display_fields() -> None
 
     result = await _propose(app, _params(), _FakeCtx(token=TOKEN))
 
-    body = result["saved_search"]
+    body = result[PROPOSE_SAVED_SEARCH_KEY]
     assert body["status"] == "ready"
     assert body["proposalId"]
     assert body["name"] == "Del Mar Homes"
@@ -322,14 +309,14 @@ async def test_re_proposal_with_a_changed_generated_name_carries_previous_name()
     first = await _propose(
         app, _params(name="Del Mar Homes A", nameWasGenerated=True), _FakeCtx(token=TOKEN)
     )
-    assert first["saved_search"]["status"] == "ready"
+    assert first[PROPOSE_SAVED_SEARCH_KEY]["status"] == "ready"
 
     second = await _propose(
         app, _params(name="Del Mar Homes B", nameWasGenerated=True), _FakeCtx(token=TOKEN)
     )
 
-    assert second["saved_search"]["status"] == "ready"
-    assert second["saved_search"]["previousName"] == "Del Mar Homes A"
+    assert second[PROPOSE_SAVED_SEARCH_KEY]["status"] == "ready"
+    assert second[PROPOSE_SAVED_SEARCH_KEY]["previousName"] == "Del Mar Homes A"
 
 
 async def test_re_proposal_with_unchanged_name_has_no_previous_name() -> None:
@@ -342,7 +329,7 @@ async def test_re_proposal_with_unchanged_name_has_no_previous_name() -> None:
         app, _params(name="Del Mar Homes", nameWasGenerated=True), _FakeCtx(token=TOKEN)
     )
 
-    assert "previousName" not in second["saved_search"]
+    assert "previousName" not in second[PROPOSE_SAVED_SEARCH_KEY]
 
 
 async def test_re_proposal_of_a_user_stated_name_never_carries_previous_name() -> None:
@@ -356,7 +343,7 @@ async def test_re_proposal_of_a_user_stated_name_never_carries_previous_name() -
         app, _params(name="Second Choice", nameWasGenerated=False), _FakeCtx(token=TOKEN)
     )
 
-    assert "previousName" not in second["saved_search"]
+    assert "previousName" not in second[PROPOSE_SAVED_SEARCH_KEY]
 
 
 async def test_client_error_becomes_an_error_envelope_not_an_exception() -> None:
@@ -366,7 +353,7 @@ async def test_client_error_becomes_an_error_envelope_not_an_exception() -> None
 
     result = await _propose(app, _params(), _FakeCtx(token=TOKEN))
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[PROPOSE_SAVED_SEARCH_KEY]["status"] == "error"
     client.create.assert_not_called()
 
 
@@ -387,5 +374,5 @@ async def test_second_proposal_for_the_same_user_supersedes_the_first() -> None:
     )
 
     user_key = user_key_from_token(TOKEN)
-    assert store.get(first["saved_search"]["proposalId"], user_key) is None
-    assert store.get(second["saved_search"]["proposalId"], user_key) is not None
+    assert store.get(first[PROPOSE_SAVED_SEARCH_KEY]["proposalId"], user_key) is None
+    assert store.get(second[PROPOSE_SAVED_SEARCH_KEY]["proposalId"], user_key) is not None

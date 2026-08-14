@@ -79,8 +79,8 @@ async def test_full_envelope_over_a_real_mcp_client() -> None:
         result = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_A})
 
     envelope = _envelope(result)
-    assert list(envelope.keys()) == ["saved_search"]
-    body = envelope["saved_search"]
+    assert list(envelope.keys()) == ["list_saved_searches"]
+    body = envelope["list_saved_searches"]
     assert body["status"] == "ok"
     assert body["count"] == 1
     record = body["savedSearches"][0]
@@ -95,7 +95,7 @@ async def test_empty_account_over_a_real_mcp_client() -> None:
     async with create_connected_server_and_client_session(_app()) as client:
         result = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_B})
 
-    body = _envelope(result)["saved_search"]
+    body = _envelope(result)["list_saved_searches"]
     assert body == {"status": "ok", "count": 0, "savedSearches": []}
 
 
@@ -103,7 +103,7 @@ async def test_anonymous_over_a_real_mcp_client() -> None:
     async with create_connected_server_and_client_session(_app()) as client:
         result = await client.call_tool("list_saved_searches", {})
 
-    assert _envelope(result) == {"saved_search": {"status": "sign_in_required"}}
+    assert _envelope(result) == {"list_saved_searches": {"status": "sign_in_required"}}
 
 
 async def test_first_cross_system_check_envelope_unwraps_to_saved_search_mode_key() -> None:
@@ -117,7 +117,7 @@ async def test_first_cross_system_check_envelope_unwraps_to_saved_search_mode_ke
 
     envelope = _envelope(result)
     top_level_dict_keys = [k for k, v in envelope.items() if isinstance(v, dict)]
-    assert top_level_dict_keys == ["saved_search"], (
+    assert top_level_dict_keys == ["list_saved_searches"], (
         "more than one top-level dict-valued key would make the orchestrator's "
         "single-key unwrap ambiguous, changing mode_key for every caller"
     )
@@ -133,8 +133,8 @@ async def test_cross_user_isolation_two_accounts_one_session() -> None:
         result_a = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_A})
         result_b = await client.call_tool("list_saved_searches", {}, meta={META_TOKEN_KEY: TOKEN_B})
 
-    body_a = _envelope(result_a)["saved_search"]
-    body_b = _envelope(result_b)["saved_search"]
+    body_a = _envelope(result_a)["list_saved_searches"]
+    body_b = _envelope(result_b)["list_saved_searches"]
 
     assert body_a["count"] == 1
     assert body_a["savedSearches"][0]["name"] == "A-Malibu"

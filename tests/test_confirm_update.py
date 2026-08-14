@@ -1,5 +1,5 @@
-"""Unit tests for `save_search`'s `update`-action confirm branch (step N7 /
-VA-404), against mocked `SavedSearchClient` / `EsQueryClient`.
+"""Unit tests for `update_saved_search`'s confirm path (steps N7 + N8 /
+VA-404 + VA-405), against mocked `SavedSearchClient` / `EsQueryClient`.
 
 The real full-replace and URL-precondition proof against actual dev/sprint
 lives in tests/test_contract_updates.py.
@@ -19,7 +19,7 @@ from vesta_saved_search.es_query_client import EsQueryClient
 from vesta_saved_search.fingerprint import criteria_fingerprint
 from vesta_saved_search.models import SavedSearchRecord
 from vesta_saved_search.proposals import ProposalStore, user_key_from_token
-from vesta_saved_search.tools import SaveSearchParams, register_tools
+from vesta_saved_search.tools import UPDATE_SAVED_SEARCH_KEY, UpdateSavedSearchParams, register_tools
 
 pytestmark = pytest.mark.unit
 
@@ -72,10 +72,10 @@ def _app_with(client: SavedSearchClient, store: ProposalStore, es_client: EsQuer
 
 
 async def _confirm(app: FastMCP, proposal_id: str) -> dict[str, Any]:
-    tool = app._tool_manager.get_tool("save_search")
+    tool = app._tool_manager.get_tool("update_saved_search")
     assert tool is not None
     result: dict[str, Any] = await tool.fn(
-        SaveSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN)
+        UpdateSavedSearchParams(proposalId=proposal_id, confirmed=True), _FakeCtx(TOKEN)
     )
     return result
 
@@ -125,15 +125,15 @@ async def test_confirmed_rename_calls_update_with_fresh_es_query() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "ok"
-    assert result["saved_search"]["name"] == "New Name"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ok"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["name"] == "New Name"
     client.update.assert_awaited_once()
     _, kwargs = client.update.call_args
     assert kwargs["es_query"] == '{"bool": {"marker": "fresh"}}'
     assert kwargs["search_filters"] == stored.search_filters
 
 
-async def test_confirming_twice_updates_once_and_replay_returns_already_saved() -> None:
+async def test_confirming_twice_updates_once_and_replay_returns_already_updated() -> None:
     stored = _record()
     client = _client([stored])
     es_client = _es_query_client()
@@ -144,8 +144,8 @@ async def test_confirming_twice_updates_once_and_replay_returns_already_saved() 
     first = await _confirm(app, proposal_id)
     second = await _confirm(app, proposal_id)
 
-    assert first["saved_search"]["status"] == "ok"
-    assert second["saved_search"]["status"] == "already_saved"
+    assert first[UPDATE_SAVED_SEARCH_KEY]["status"] == "ok"
+    assert second[UPDATE_SAVED_SEARCH_KEY]["status"] == "already_updated"
     client.update.assert_awaited_once()
 
 
@@ -169,8 +169,8 @@ async def test_live_duplicate_criteria_check_re_runs_at_confirm_time() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "criteria_already_saved"
-    assert result["saved_search"]["existingName"] == "A Newer Duplicate"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "criteria_already_saved"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["existingName"] == "A Newer Duplicate"
     client.update.assert_not_called()
 
 
@@ -185,7 +185,7 @@ async def test_live_name_collision_check_re_runs_at_confirm_time() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "name_exists"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "name_exists"
     client.update.assert_not_called()
 
 
@@ -209,7 +209,7 @@ async def test_criteria_change_with_no_duplicate_succeeds() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "ok"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ok"
     client.update.assert_awaited_once()
 
 
@@ -223,7 +223,7 @@ async def test_update_never_collides_with_the_record_being_updated_itself() -> N
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "ok"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ok"
 
 
 async def test_upstream_failure_never_produces_a_success_status() -> None:
@@ -236,7 +236,7 @@ async def test_upstream_failure_never_produces_a_success_status() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "error"
 
 
 async def test_deleted_record_at_confirm_time_becomes_a_clean_error() -> None:
@@ -250,7 +250,7 @@ async def test_deleted_record_at_confirm_time_becomes_a_clean_error() -> None:
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "error"
     client.update.assert_not_called()
 
 
@@ -264,7 +264,7 @@ async def test_live_list_failure_at_confirm_time_becomes_an_error_envelope() -> 
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "error"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "error"
     client.update.assert_not_called()
 
 
@@ -293,7 +293,7 @@ async def test_url_consistency_is_re_checked_at_confirm_time_for_criteria_change
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "invalid"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "invalid"
     client.update.assert_not_called()
 
 
@@ -310,5 +310,5 @@ async def test_apply_update_reuses_the_already_fetched_list_not_a_second_call() 
 
     result = await _confirm(app, proposal_id)
 
-    assert result["saved_search"]["status"] == "ok"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ok"
     client.list_saved_searches.assert_awaited_once()
