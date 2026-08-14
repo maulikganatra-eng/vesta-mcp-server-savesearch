@@ -613,8 +613,13 @@ def register_tools(
             if isinstance(settled, dict):
                 return {key: settled}
             final_name, regeneration_attempts = settled
-
-        store.clear_naming_attempts(user_key, update_fingerprint)
+            # Only clear when a naming decision was actually made this call --
+            # a frequency-only or criteria-only (no rename) propose never
+            # touches naming at all, and must not reset an unrelated,
+            # still-in-progress naming negotiation for this same fingerprint
+            # (e.g. an earlier rename attempt that got `name_needs_regeneration`)
+            # just because the caller happened to change something else.
+            store.clear_naming_attempts(user_key, update_fingerprint)
 
         # 🔴 Casefolded, matching frequency.py's own case-insensitive lookup
         # -- a raw `!=` here would treat the model resending "Daily" during

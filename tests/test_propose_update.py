@@ -714,3 +714,30 @@ async def test_deterministic_fallback_avoids_reproducing_the_current_name() -> N
     body = result[UPDATE_SAVED_SEARCH_KEY]
     assert body["status"] == "ready"
     assert body["name"] != stored.name
+
+
+async def test_frequency_only_call_does_not_clear_an_in_progress_naming_negotiation() -> None:
+    """🔴 `store.clear_naming_attempts` must only fire when THIS call actually
+    settled a name -- a frequency-only (or criteria-only, no-rename) propose
+    never makes a naming decision at all, and must not reset an unrelated,
+    still-in-progress naming negotiation for the same fingerprint (e.g. an
+    earlier rename attempt that already hit `name_needs_regeneration` once)
+    just because the caller happened to change something else in between."""
+    stored = _record(saved_search_id=42, notification_frequency="never")
+    client = _client([stored])
+    store = ProposalStore()
+    user_key = user_key_from_token(TOKEN)
+    fingerprint = criteria_fingerprint(stored.search_filters, stored.search_mode)
+    assert store.note_naming_failure(user_key, fingerprint) == 1
+    app = _app_with(client, store)
+
+    result = await _propose(
+        app,
+        UpdateSavedSearchParams(savedSearchId=42, notificationFrequency="daily"),
+        _FakeCtx(TOKEN),
+    )
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "ready"
+
+    # If the frequency-only call above had cleared the counter, this would
+    # restart at 1 instead of continuing the same negotiation at 2.
+    assert store.note_naming_failure(user_key, fingerprint) == 2
