@@ -188,6 +188,39 @@ class UpdateSavedSearchParams(BaseModel):
                 "provide exactly one of: savedSearchId (+ at least one change, to propose "
                 "an update), or proposalId + confirmed (to confirm one already proposed)"
             )
+        if is_confirm:
+            # 🔴 Unlike `SaveSearchParams` (deliberately JUST `{proposalId,
+            # confirmed}` -- see its own docstring: "not a resend of the
+            # whole payload"), this model merges propose and confirm into
+            # one shape with every propose field optional. Without this
+            # check, a propose-only field resent alongside `proposalId` +
+            # `confirmed` would pass validation, then be silently ignored --
+            # `update_saved_search`'s confirm branch reads only
+            # `params.proposalId`/`params.confirmed`, never
+            # `params.notificationFrequency` etc. -- so a caller who changed
+            # their mind between propose and confirm turns would see their
+            # confirm call succeed while writing the STALE, originally
+            # proposed value instead of what they just asked for, with no
+            # error telling them so.
+            propose_only_fields = {
+                "name": self.name,
+                "nameWasGenerated": self.nameWasGenerated,
+                "searchFilters": self.searchFilters,
+                "esQuery": self.esQuery,
+                "searchUrl": self.searchUrl,
+                "searchMode": self.searchMode,
+                "criteriaSummary": self.criteriaSummary,
+                "notificationFrequency": self.notificationFrequency,
+            }
+            set_fields = [name for name, value in propose_only_fields.items() if value is not None]
+            if self.unsupportedFilters:
+                set_fields.append("unsupportedFilters")
+            if set_fields:
+                raise ValueError(
+                    "a confirm call takes only proposalId + confirmed -- "
+                    f"{', '.join(sorted(set_fields))} must not be resent here; a change of "
+                    "mind requires a new propose call"
+                )
         if is_propose:
             has_name = self.name is not None
             has_criteria = self.searchFilters is not None

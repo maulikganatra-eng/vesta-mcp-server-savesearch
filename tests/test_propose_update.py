@@ -424,6 +424,30 @@ async def test_exactly_one_shape_rejects_both_and_neither() -> None:
         UpdateSavedSearchParams()
 
 
+async def test_confirm_shape_rejects_a_resent_propose_only_field() -> None:
+    """🔴 Unlike `SaveSearchParams` (deliberately JUST `{proposalId,
+    confirmed}`), this model merges propose and confirm into one shape with
+    every propose field optional -- without this check, a caller changing
+    their mind between propose and confirm turns (e.g. resending
+    `notificationFrequency` on the confirm call) would have that field
+    silently ignored: `update_saved_search`'s confirm branch reads only
+    `proposalId`/`confirmed`, so the write would carry the STALE, originally
+    proposed value with no error telling the caller their new value never
+    took effect."""
+    with pytest.raises(ValueError, match="must not be resent here"):
+        UpdateSavedSearchParams(proposalId="abc", confirmed=True, notificationFrequency="daily")
+    with pytest.raises(ValueError, match="must not be resent here"):
+        UpdateSavedSearchParams(proposalId="abc", confirmed=True, name="New Name")
+    with pytest.raises(ValueError, match="must not be resent here"):
+        UpdateSavedSearchParams(proposalId="abc", confirmed=True, unsupportedFilters=["home theater"])
+
+
+async def test_confirm_shape_accepts_bare_proposal_id_and_confirmed() -> None:
+    """The unaffected, actually-supported confirm shape must still validate cleanly."""
+    UpdateSavedSearchParams(proposalId="abc", confirmed=True)
+    UpdateSavedSearchParams(proposalId="abc", confirmed=False)
+
+
 async def test_propose_requires_at_least_one_change() -> None:
     """The params validator's presence check: savedSearchId alone, with no
     name/criteria/frequency at all, is rejected before any HTTP call."""
@@ -499,21 +523,45 @@ async def test_unknown_stored_frequency_is_invalid_not_a_crash_when_carried_forw
 
 
 async def test_unknown_stored_frequency_does_not_block_a_genuine_no_change() -> None:
-    """The same corrupted-frequency guard must not preempt `no_change` -- a
-    call that changes nothing at all must resolve to `no_change`, never
-    `invalid`, even when the stored record's frequency is unmappable,
-    because nothing is actually being sent upstream."""
-    stored = _record(saved_search_id=42, name="Del Mar Homes", notification_frequency="unknown")
+    """🔴 The stored-frequency guard (tools.py's `if not frequency_changed:`
+    block) must never even run for a genuine no-op -- it only exists to
+    catch what would otherwise be SENT to `apply_update`, and a no-op sends
+    nothing. This must NOT be exercised by requesting `notificationFrequency
+    ="unknown"` -- that trips the separate, cheap FORMAT-validity guard on
+    the REQUESTED value, at the very top of `_propose_update`, before the
+    record is even fetched, which would pass this test for the wrong reason
+    even if the `no_change` short-circuit were ever reordered after the
+    stored-frequency guard. Instead: the call resends the record's own
+    unchanged criteria bundle (satisfying "at least one change" via
+    `searchFilters`) and never mentions `notificationFrequency` at all, so
+    the ONLY way this can resolve to `no_change` is via the diff against the
+    stored record being genuinely empty -- which is exactly the path that
+    would otherwise hit the corrupted `"unknown"` stored frequency."""
+    stored = _record(
+        saved_search_id=42,
+        name="Del Mar Homes",
+        search_filters={"city": "Del Mar"},
+        search_mode="forSale",
+        notification_frequency="unknown",
+    )
     client = _client([stored])
     app = _app_with(client, ProposalStore())
 
     result = await _propose(
         app,
-        UpdateSavedSearchParams(savedSearchId=42, notificationFrequency="unknown"),
+        UpdateSavedSearchParams(
+            savedSearchId=42,
+            searchFilters={"city": "Del Mar"},
+            esQuery='{"bool": {}}',
+            searchUrl="explore/listings/saved-search/42/for-sale?city=Del%20Mar",
+            searchMode="forSale",
+            criteriaSummary="Del Mar, for sale",
+        ),
         _FakeCtx(TOKEN),
     )
 
-    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "invalid"
+    assert result[UPDATE_SAVED_SEARCH_KEY]["status"] == "no_change"
+    client.update.assert_not_called()
 
 
 async def test_unknown_stored_frequency_explicitly_fixed_by_the_call_succeeds() -> None:
