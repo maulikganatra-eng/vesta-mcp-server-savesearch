@@ -38,11 +38,14 @@ _FREQUENCY_TO_SCHEDULE_INTERVAL: Final[dict[str, int]] = {
     "instantly": 2,
 }
 
-#: Backward map, read side, keyed on the PAIR — never on `notify` or `scheduleId`
-#: alone. `scheduleInterval` is write-only and is never returned by any read.
+#: Backward map, read side. `scheduleInterval` is write-only and is never returned
+#: by any read; `scheduleId` is the durable identifier of *which* schedule is
+#: attached, and is authoritative on its own for identifying never/daily/instantly.
+#: `notify` is accepted alongside it but NOT required to match a specific value —
+#: see the GS-8670 history below for why.
 #:
-#: Verified directly against dev, by creating one record per frequency and reading
-#: it back:
+#: Verified directly against dev in August 2026, by creating one record per
+#: frequency and reading it back:
 #:
 #: | Sent (scheduleInterval) | `notify` back | `scheduleId` back |
 #: |---|---|---|
@@ -50,17 +53,28 @@ _FREQUENCY_TO_SCHEDULE_INTERVAL: Final[dict[str, int]] = {
 #: | 1 (daily)     | False | 3    |
 #: | 2 (instantly) | True  | 1    |
 #:
-#: 🔴 `notify` is `False` for BOTH never and daily. A reader that used `notify`
-#: alone to answer "is this on" would tell a user with a daily saved search that
-#: their notifications are off — a plainly wrong statement about their own data.
-#: `scheduleId` alone happens to be sufficient today, but these are opaque server
-#: ids, and building on one field to carry a two-field concept is fragile. Map over
-#: the pair, in this one place, so nothing else in the codebase is tempted to read
-#: either field alone.
-_NOTIFY_SCHEDULE_TO_FREQUENCY: Final[dict[tuple[bool | None, int | None], Frequency]] = {
-    (False, None): "never",
-    (False, 3): "daily",
-    (True, 1): "instantly",
+#: 🔴 GS-8670 (fixed on the GuestSite API/UI side, closed 2026-09-07): re-verified
+#: directly against QA on 2026-09-10, the SAME `scheduleInterval` values now read
+#: back as:
+#:
+#: | Sent (scheduleInterval) | `notify` back | `scheduleId` back |
+#: |---|---|---|
+#: | 0 (never)     | False | None |
+#: | 1 (daily)     | **True**  | 3    |
+#: | 2 (instantly) | True  | 1    |
+#:
+#: Only the Daily row's `notify` flipped from False to True — exactly the fragile
+#: spot this module's docstring warned about before the fix ever happened. Any
+#: environment could be running either API version depending on deploy timing, so
+#: this function must accept BOTH the pre-fix and post-fix `notify` value for
+#: Daily. `scheduleId` is the field that stayed stable across the fix and is what
+#: this map keys on; `notify` is otherwise ignored on read (it is never `false` for
+#: an active schedule anymore, but was for the pre-fix Daily case, so it cannot be
+#: asserted equal to any particular value without reintroducing GS-8693/GS-8694).
+_SCHEDULE_ID_TO_FREQUENCY: Final[dict[int | None, Frequency]] = {
+    None: "never",
+    3: "daily",
+    1: "instantly",
 }
 
 
@@ -96,10 +110,17 @@ def frequency_to_schedule_interval(frequency: str) -> int:
 def schedule_pair_to_frequency(notify: bool | None, schedule_id: int | None) -> Frequency:
     """Map the `(notify, scheduleId)` pair read back from the API to a frequency.
 
-    An unrecognised pair returns ``"unknown"`` rather than defaulting to
-    ``"never"``. See the module docstring's open question about why Daily reads
-    back as ``notify=False`` — if that is ever "fixed" upstream, `(False, 3)` will
-    stop occurring and this function must not have quietly been treating unmapped
-    pairs as "never" the whole time, which would misreport a schedule as off.
+    Keeps the `(notify, scheduleId)` signature everywhere this is called from
+    (`models.py`'s `from_api`) for a stable call site, but keys the actual
+    decision on `scheduleId` alone — see GS-8670 in the module docstring for why
+    `notify` cannot be trusted to hold a fixed value for a given frequency across
+    API versions. `notify` is accepted but intentionally unused: it is documented
+    input, not a silently-dropped parameter.
+
+    An unrecognised `scheduleId` returns ``"unknown"`` rather than defaulting to
+    ``"never"`` — a schedule id the API introduces later (or one from an
+    environment this codebase hasn't verified) must surface as "we don't know",
+    never quietly report as "off".
     """
-    return _NOTIFY_SCHEDULE_TO_FREQUENCY.get((notify, schedule_id), "unknown")
+    del notify  # documented as read-side input; not used in the decision — see docstring
+    return _SCHEDULE_ID_TO_FREQUENCY.get(schedule_id, "unknown")

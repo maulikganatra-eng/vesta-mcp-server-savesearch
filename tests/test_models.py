@@ -11,14 +11,14 @@ import json
 
 import pytest
 
-from _guestsite_fixtures import fixture_body
+from _guestsite_fixtures import fixture_body, fixture_body_qa
 from vesta_saved_search.errors import SavedSearchUnexpectedResponseError
 from vesta_saved_search.models import SavedSearchRecord
 
 pytestmark = pytest.mark.unit
 
 
-def _first_record_from(fixture_name: str) -> dict[str, object]:
+def _first_record_from(fixture_name: str, *, qa: bool = False) -> dict[str, object]:
     """Get one raw record out of a fixture, whichever of the two real envelopes it is.
 
     `list_baseline` etc. are a bare JSON array. `create_daily`,
@@ -28,8 +28,11 @@ def _first_record_from(fixture_name: str) -> dict[str, object]:
     hand here, rather than importing the client's own decoder, keeps this test
     fixture-only: it must not depend on the very code under test to interpret
     its own fixtures.
+
+    ``qa=True`` loads from tests/fixtures/guestsite_qa/ (recorded 2026-09-10,
+    after the GS-8670 GuestSite API fix) instead of the pre-fix guestsite_dev/.
     """
-    body = fixture_body(fixture_name)
+    body = fixture_body_qa(fixture_name) if qa else fixture_body(fixture_name)
     if isinstance(body, list):
         result: dict[str, object] = body[0]
         return result
@@ -83,6 +86,28 @@ def test_casing_trap_is_visible_in_the_decoded_dict() -> None:
 )
 def test_frequency_decoded_from_real_pairs(fixture_name: str, expected_frequency: str) -> None:
     raw = _first_record_from(fixture_name)
+    record = SavedSearchRecord.from_api(raw)
+    assert record.notification_frequency == expected_frequency
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_frequency"),
+    [
+        ("create_never", "never"),
+        ("create_daily", "daily"),
+        ("create_instantly", "instantly"),
+    ],
+)
+def test_frequency_decoded_from_post_gs_8670_qa_pairs(
+    fixture_name: str, expected_frequency: str
+) -> None:
+    """GS-8693/GS-8694: re-verified against QA on 2026-09-10, after Ignacio
+    Fernandez's GS-8670 fix changed Daily's `notify` from False to True (see
+    tests/fixtures/guestsite_qa/README.md). This is the fixture that would have
+    caught the regression before QA did -- the old (notify, scheduleId)-pair map
+    decoded this exact `create_daily` (QA) record to "unknown", not "daily".
+    """
+    raw = _first_record_from(fixture_name, qa=True)
     record = SavedSearchRecord.from_api(raw)
     assert record.notification_frequency == expected_frequency
 

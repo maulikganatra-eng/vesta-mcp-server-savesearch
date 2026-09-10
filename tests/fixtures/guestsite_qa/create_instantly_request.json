@@ -1,0 +1,16 @@
+{
+  "searchName": "zz-qa-fixture-044584-si2",
+  "searchFilters": {
+    "mode": "forSale",
+    "city": "Beverly Hills",
+    "homeType": [
+      "0",
+      "1"
+    ],
+    "status": "active,comingSoon",
+    "SortBy": "new"
+  },
+  "searchUrl": "explore/listings/for-sale?city=Beverly%20Hills&status=active,comingSoon&mode=forSale&homeType=0,1&sortBy=new",
+  "esQuery": "{\"bool\": {\"must\": [{\"term\": {\"city\": {\"value\": \"beverly hills\"}}}]}}",
+  "scheduleInterval": 2
+}

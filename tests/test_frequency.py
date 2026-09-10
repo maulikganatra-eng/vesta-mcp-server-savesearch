@@ -1,4 +1,4 @@
-"""Unit tests for the frequency mapping, both directions (step N2 / VA-397)."""
+"""Unit tests for the frequency mapping, both directions (step N2 / VA-397, GS-8057)."""
 
 from __future__ import annotations
 
@@ -45,52 +45,61 @@ def test_forward_map_is_case_and_whitespace_insensitive(frequency: str, expected
 @pytest.mark.parametrize(
     ("notify", "schedule_id", "expected"),
     [
+        # Pre-GS-8670 pairs (verified against dev, August 2026).
         (False, None, "never"),
         (False, 3, "daily"),
         (True, 1, "instantly"),
+        # Post-GS-8670 pairs (re-verified against QA, 2026-09-10, after Ignacio
+        # Fernandez's API-side fix for GS-8670). Only Daily's `notify` changed.
+        (True, None, "never"),
+        (True, 3, "daily"),
     ],
 )
-def test_backward_map_matches_verified_dev_pairs(
+def test_backward_map_is_keyed_on_schedule_id_not_notify(
     notify: bool, schedule_id: int | None, expected: str
 ) -> None:
-    """These three pairs are recorded straight from dev, not invented.
+    """GS-8693/GS-8694: the API changed which `notify` value accompanies a Daily
+    schedule (False -> True) without changing `scheduleId`. A map keyed on the
+    (notify, scheduleId) *pair* broke the instant that happened -- a Daily search
+    started reading back as "unknown" because (True, 3) wasn't a recognised pair.
 
-    See tests/fixtures/guestsite_dev/create_daily.json (False, 3) and
-    create_instantly.json (True, 1).
+    `scheduleId` alone has been stable across the fix and uniquely identifies the
+    frequency in every fixture recorded from either API version, so the map now
+    keys on it alone and treats `notify` as informational, not load-bearing.
     """
     assert schedule_pair_to_frequency(notify, schedule_id) == expected
 
 
-def test_notify_false_does_not_mean_never() -> None:
-    """🔴 The single most important row in the backward map.
-
-    `notify` is False for BOTH never and daily. Reading it alone would tell a user
-    with a daily saved search that their notifications are off — a plainly wrong
-    statement about their own data.
+def test_notify_value_does_not_change_the_answer_for_a_given_schedule_id() -> None:
+    """🔴 The regression this fix targets, pinned directly: for the SAME
+    scheduleId, flipping `notify` must never flip the reported frequency. This is
+    exactly the axis GS-8693/GS-8694 broke on when the API's `notify` value for
+    Daily changed out from under a (notify, scheduleId)-pair-keyed map.
     """
-    # The two assertions below are the real check: they pin never and daily to two
-    # distinct literal strings. A version that collapsed them to the same value
-    # would fail here directly, so there is no separate `!=` to add on top.
-    assert schedule_pair_to_frequency(False, None) == "never"
-    assert schedule_pair_to_frequency(False, 3) == "daily"
+    assert schedule_pair_to_frequency(False, 3) == schedule_pair_to_frequency(True, 3) == "daily"
+    assert schedule_pair_to_frequency(False, None) == schedule_pair_to_frequency(True, None) == "never"
+    assert schedule_pair_to_frequency(False, 1) == schedule_pair_to_frequency(True, 1) == "instantly"
 
 
 @pytest.mark.parametrize(
     ("notify", "schedule_id"),
     [
-        (True, None),  # notify=True but no schedule at all -- inconsistent
-        (True, 3),  # instantly's notify with daily's schedule id
-        (False, 1),  # never/daily's notify with instantly's schedule id
-        (None, None),  # a record type this API has never been observed to return
-        (False, 99),  # an id from neither documented pair
+        (False, 99),  # an id from no documented frequency
+        (True, 2),  # an id from no documented frequency
+        (None, 7),  # an id from no documented frequency
     ],
 )
-def test_unrecognised_pair_is_unknown_never_never(notify: bool | None, schedule_id: int | None) -> None:
-    """🔴 An unmapped pair must answer "unknown", never silently "never".
+def test_unrecognised_schedule_id_is_unknown_never_never(
+    notify: bool | None, schedule_id: int | None
+) -> None:
+    """🔴 An unmapped, non-null scheduleId must answer "unknown", never silently
+    "never".
 
-    If the API's Daily/notify=False quirk is ever fixed upstream, (False, 3) stops
-    occurring and (True, 3) starts. A backward map that defaulted unmapped pairs to
-    "never" would then silently misreport every daily search as off, right at the
-    moment the underlying bug it was compensating for went away.
+    A schedule id the API introduces later (or returns from an environment this
+    codebase hasn't verified) must surface as "we don't know", not quietly report
+    a schedule as off. `schedule_id is None` is excluded here deliberately: that
+    value has been observed, consistently, to mean "no schedule attached" across
+    both the pre- and post-GS-8670 API — see
+    `test_backward_map_is_keyed_on_schedule_id_not_notify`.
     """
     assert schedule_pair_to_frequency(notify, schedule_id) == "unknown"
