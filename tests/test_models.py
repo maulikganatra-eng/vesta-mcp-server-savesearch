@@ -112,6 +112,42 @@ def test_frequency_decoded_from_post_gs_8670_qa_pairs(
     assert record.notification_frequency == expected_frequency
 
 
+def test_daily_with_extra_notify_field_in_request_still_decodes_correctly() -> None:
+    """Uses the previously-unwired `create_daily_with_notify_field` QA fixture
+    (recorded to answer "does saveAI honour an extra `notify` field in the request
+    body?" -- it doesn't observably change anything) -- flagged in review as
+    recorded but never asserted on by any test."""
+    raw = _first_record_from("create_daily_with_notify_field", qa=True)
+    record = SavedSearchRecord.from_api(raw)
+    assert record.notification_frequency == "daily"
+
+
+def test_missing_schedule_id_key_decodes_to_unknown_not_never() -> None:
+    """🔴 Review follow-up (PR #11): `raw.get("scheduleId")` returns None both when
+    the key is explicitly null (a real "never" state) and when the key is missing
+    entirely (a shape never observed from the real API). Collapsing those would
+    confidently report notifications as off for a response this codebase has never
+    actually seen -- the exact failure this module exists to prevent. A record
+    missing the key altogether must decode to "unknown", never "never".
+    """
+    raw = dict(_first_record_from("list_baseline"))
+    assert "scheduleId" in raw, "fixture assumption: the real API always sends this key"
+    del raw["scheduleId"]
+    record = SavedSearchRecord.from_api(raw)
+    assert record.notification_frequency == "unknown"
+
+
+def test_explicit_null_schedule_id_still_decodes_to_never() -> None:
+    """Companion to the above: an explicitly-present `scheduleId: null` (as opposed
+    to the key being absent) is the real, observed "never" state and must still
+    decode as such -- the fix for the absent-key case must not have broken this."""
+    raw = dict(_first_record_from("list_baseline"))
+    raw["scheduleId"] = None
+    raw["notify"] = False
+    record = SavedSearchRecord.from_api(raw)
+    assert record.notification_frequency == "never"
+
+
 def test_double_replace_trap_is_visible_after_decode() -> None:
     """🔴 The URL-placeholder trap, confirmed live on dev (not just sprint).
 

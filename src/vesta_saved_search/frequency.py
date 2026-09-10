@@ -1,4 +1,4 @@
-"""The notification-frequency mapping, both directions (step N2 / VA-397).
+"""The notification-frequency mapping, both directions (step N2 / VA-397, GS-8057).
 
 This is its own module, separate from the client, because the two directions have
 different failure modes and both are easy to get backwards under time pressure:
@@ -6,9 +6,13 @@ different failure modes and both are easy to get backwards under time pressure:
 * **Forward (write)**: only three integers mean anything, and the service will not
   tell you if you send a fourth. Silence, not an error, is the failure to guard
   against — so this side validates and raises *before* any HTTP call is made.
-* **Backward (read)**: the service decomposes one written value into a PAIR of
-  fields on read, and reading either one alone lies about the other. This side
-  exists to make reading a single field structurally impossible.
+* **Backward (read)**: originally built to decompose one written value from a PAIR
+  of returned fields, on the belief that reading either one alone would lie about
+  the other. GS-8670 (below) falsified that belief for `notify`: the API changed
+  which `notify` value accompanies an unchanged `scheduleId`, which broke the pair
+  match itself (GS-8693/GS-8694). This side now reads `scheduleId` alone — verified
+  stable across both API versions — and treats `notify` as informational, not
+  load-bearing. See :func:`schedule_pair_to_frequency` for the current contract.
 """
 
 from __future__ import annotations
@@ -68,9 +72,16 @@ _FREQUENCY_TO_SCHEDULE_INTERVAL: Final[dict[str, int]] = {
 #: environment could be running either API version depending on deploy timing, so
 #: this function must accept BOTH the pre-fix and post-fix `notify` value for
 #: Daily. `scheduleId` is the field that stayed stable across the fix and is what
-#: this map keys on; `notify` is otherwise ignored on read (it is never `false` for
-#: an active schedule anymore, but was for the pre-fix Daily case, so it cannot be
-#: asserted equal to any particular value without reintroducing GS-8693/GS-8694).
+#: this map keys on; `notify` is otherwise ignored on read.
+#:
+#: 🔴 Review follow-up (PR #11): none of the three pairs recorded above (pre- or
+#: post-fix) actually has `notify=False` alongside a non-null `scheduleId` — every
+#: recorded pair has `notify` agreeing with "is a schedule attached". Ignoring
+#: `notify` entirely is only verified safe for the states this codebase has
+#: observed; it is NOT verified against a hypothetical future "pause notifications,
+#: keep the schedule" state (`notify=False`, `scheduleId` non-null), which does not
+#: exist in the API today but would silently read back as "on" if it were ever
+#: added. Re-verify this table if GuestSite ever ships a pause/mute feature.
 _SCHEDULE_ID_TO_FREQUENCY: Final[dict[int | None, Frequency]] = {
     None: "never",
     3: "daily",

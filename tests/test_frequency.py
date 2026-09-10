@@ -49,10 +49,15 @@ def test_forward_map_is_case_and_whitespace_insensitive(frequency: str, expected
         (False, None, "never"),
         (False, 3, "daily"),
         (True, 1, "instantly"),
-        # Post-GS-8670 pairs (re-verified against QA, 2026-09-10, after Ignacio
-        # Fernandez's API-side fix for GS-8670). Only Daily's `notify` changed.
-        (True, None, "never"),
+        # Post-GS-8670 pairs actually RECORDED against QA, 2026-09-10 (see
+        # tests/fixtures/guestsite_qa/), after Ignacio Fernandez's API-side fix.
+        # Only Daily's `notify` changed.
         (True, 3, "daily"),
+        # Synthesized, NOT recorded from any live response -- no fixture has ever
+        # shown `notify=True` with `scheduleId=None`. Included because the fix's
+        # whole point is that `notify` must not change the answer for a given
+        # `scheduleId`, and `None` needs the same guarantee as every other id.
+        (True, None, "never"),
     ],
 )
 def test_backward_map_is_keyed_on_schedule_id_not_notify(
