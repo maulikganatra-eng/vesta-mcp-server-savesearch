@@ -90,9 +90,13 @@ class _FakeGuestSite:
                     record["searchFilters"] = json.dumps(body["searchFilters"])
                     record["searchUrl"] = body["searchUrl"]
                     # Full-replace: scheduleInterval 0/absent -> never (scheduleId null).
+                    # Post-GS-8670 decode (matches QA as of 2026-09-10, see
+                    # tests/fixtures/guestsite_qa/README.md): notify=True for both
+                    # daily and instantly, not just instantly as it was pre-fix --
+                    # kept in sync with test_component_save_flow.py's fake.
                     schedule_interval = body.get("scheduleInterval")
                     record["scheduleId"] = {0: None, 1: 3, 2: 1}.get(schedule_interval)
-                    record["notify"] = schedule_interval == 2
+                    record["notify"] = schedule_interval in (1, 2)
                     return httpx.Response(
                         200, json={"savedSearch": json.dumps([record]), "status": "ok"}
                     )

@@ -78,6 +78,15 @@ class _FakeGuestSite:
                 return httpx.Response(400, json={"status": "exists", "savedSearch": None})
 
             self._next_id += 1
+            # Post-GS-8670 decode of scheduleInterval -> (notify, scheduleId), matching
+            # what QA returns as of 2026-09-10 (see tests/fixtures/guestsite_qa/README.md):
+            # never -> (False, None), daily -> (True, 3), instantly -> (True, 1). Before
+            # this fake decoded every create as (False, None) regardless of what was
+            # sent, so no create-path test here could ever observe anything but "never"
+            # in the response -- exactly the GS-8693/GS-8694 blind spot.
+            schedule_interval = body.get("scheduleInterval")
+            schedule_id = {0: None, 1: 3, 2: 1}.get(schedule_interval)
+            notify = schedule_interval in (1, 2)
             record = {
                 "savedSearchId": self._next_id,
                 "searchNumber": "fake",
@@ -89,8 +98,8 @@ class _FakeGuestSite:
                 "lastUpdate": "2026-01-01T00:00:00",
                 "consumerId": 1,
                 "newListingsSinceCertainDate": 0,
-                "notify": False,
-                "scheduleId": None,
+                "notify": notify,
+                "scheduleId": schedule_id,
                 "createdDate": "2026-01-01T00:00:00",
             }
             account.append(record)
@@ -137,6 +146,34 @@ async def test_full_propose_confirm_write_over_a_real_mcp_client() -> None:
     assert save_body["status"] == "ok"
     assert save_body["name"] == "Del Mar Homes"
     assert len(fake.create_calls) == 1
+
+
+async def test_create_with_daily_frequency_reports_daily_in_the_ok_envelope() -> None:
+    """GS-8693/GS-8669: this is the create-path assertion that was structurally
+    impossible before -- the fake used to hard-code (notify=False, scheduleId=None)
+    for every create regardless of what was sent, so nothing here could ever catch
+    a create-confirm envelope reporting the wrong frequency. Now the fake decodes
+    scheduleInterval realistically (post-GS-8670 shape), so this pins the exact
+    regression QA hit: confirm a Daily save and see "daily" back, not "never" or
+    "unknown".
+    """
+    fake = _FakeGuestSite()
+    daily_input = {**_VALID_PROPOSAL_INPUT, "notificationFrequency": "daily"}
+    async with create_connected_server_and_client_session(_app(fake)) as client:
+        proposed = await client.call_tool(
+            "propose_saved_search", {"params": daily_input}, meta={META_TOKEN_KEY: TOKEN_A}
+        )
+        proposal_id = _envelope(proposed)["propose_saved_search"]["proposalId"]
+
+        confirmed = await client.call_tool(
+            "save_search",
+            {"params": {"proposalId": proposal_id, "confirmed": True}},
+            meta={META_TOKEN_KEY: TOKEN_A},
+        )
+        save_body = _envelope(confirmed)["save_search"]
+
+    assert save_body["status"] == "ok"
+    assert save_body["notificationFrequency"] == "daily"
 
 
 async def test_walking_every_propose_branch_keeps_the_write_count_at_zero() -> None:

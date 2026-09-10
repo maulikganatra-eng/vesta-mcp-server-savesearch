@@ -13,7 +13,7 @@ import json
 import httpx
 import pytest
 
-from _guestsite_fixtures import fixture_body, fixture_status
+from _guestsite_fixtures import fixture_body, fixture_body_qa, fixture_status, fixture_status_qa
 from vesta_saved_search.client import SavedSearchClient
 from vesta_saved_search.errors import (
     SavedSearchApiError,
@@ -57,6 +57,16 @@ def _replay(fixture_name: str) -> Callable[[httpx.Request], httpx.Response]:
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return _json_response(fixture_status(fixture_name), fixture_body(fixture_name))
+
+    return handler
+
+
+def _replay_qa(fixture_name: str) -> Callable[[httpx.Request], httpx.Response]:
+    """Same as :func:`_replay`, but from tests/fixtures/guestsite_qa/ -- recorded
+    2026-09-10, after the GS-8670 GuestSite API fix."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _json_response(fixture_status_qa(fixture_name), fixture_body_qa(fixture_name))
 
     return handler
 
@@ -145,6 +155,26 @@ async def test_create_decodes_the_double_encoded_envelope() -> None:
         notification_frequency="daily",
     )
     assert record.saved_search_id == 1089
+    assert record.notification_frequency == "daily"
+
+
+async def test_create_daily_decodes_correctly_against_post_gs_8670_qa_response() -> None:
+    """GS-8693/GS-8669: re-verified end-to-end (HTTP -> parse -> frequency map)
+    against the real QA response recorded 2026-09-10, after Ignacio Fernandez's
+    GS-8670 fix flipped Daily's `notify` from False to True. Before that fix,
+    `test_create_decodes_the_double_encoded_envelope` above (against the older
+    guestsite_dev fixture) was the only coverage here, and it could not have
+    caught this regression because its fixture predates the change.
+    """
+    client = _client_with(_replay_qa("create_daily"))
+    record = await client.create(
+        FAKE_TOKEN,
+        name="anything",
+        search_filters={},
+        search_url="anything",
+        es_query="{}",
+        notification_frequency="daily",
+    )
     assert record.notification_frequency == "daily"
 
 

@@ -1,0 +1,10 @@
+{
+  "_recorded_from": "qa",
+  "_request_method": "POST",
+  "_request_url": "https://www.qa.themls.com/GuestSiteApi/SavedSearches/saveAI",
+  "_status_code": 200,
+  "body": {
+    "status": "ok",
+    "savedSearch": "[{\"savedSearchId\":4439,\"searchNumber\":\"0C8A5AFF-86B8-4EBB-9C96-A2895F6499C9\",\"searchName\":\"zz-qa-fixture-044584-notifytest\",\"searchType\":\"forSale\",\"criteria\":\"<criterias><criteria><field>City<\\/field><value1>Beverly Hills<\\/value1><value2\\/><options\\/><\\/criteria><criteria><field>Status<\\/field><value1>5,55<\\/value1><value2\\/><options\\/><\\/criteria><criteria><field>PropertyType<\\/field><value1>0,1<\\/value1><value2\\/><options\\/><\\/criteria><\\/criterias>\",\"searchFilters\":\"{\\\"city\\\":\\\"Beverly Hills\\\",\\\"status\\\":\\\"active,comingSoon\\\",\\\"mode\\\":\\\"forSale\\\",\\\"homeType\\\":[\\\"0\\\",\\\"1\\\"],\\\"sortBy\\\":\\\"new\\\",\\\"consumerId\\\":1000101015}\",\"searchUrl\":\"explore\\/listings\\/saved-search\\/4439\\/for-sale?city=Beverly%20Hills&status=active,comingSoon&mode=forSale&homeType=0,1&sortBy=new\",\"lastUpdate\":\"2026-09-10T05:49:44.407\",\"consumerId\":1000101015,\"newListingsSinceCertainDate\":0,\"notify\":true,\"includeOHNotify\":false,\"sourceOf\":2,\"lastRunTime\":\"2026-09-10T05:49:44.407\",\"lastSearchTime\":\"2026-09-10T05:49:44.407\",\"expirationDate\":\"2026-12-09T05:49:44.407\",\"lastViewTime\":null,\"createdDate\":\"2026-09-10T05:49:44.407\",\"allowReverseProspecting\":true,\"notifyChangeType\":null,\"scheduleId\":3,\"pushNotificationEnabled\":false,\"propertyTypes\":\"0,1\"}]"
+  }
+}

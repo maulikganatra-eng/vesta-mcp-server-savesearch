@@ -49,8 +49,10 @@ class SavedSearchRecord:
           write is harmless — but callers computing a fingerprint (step N4) must
           drop it themselves; stripping it here would hide from N4 the exact key
           it has to know to exclude.
-        * **The `(notify, scheduleId)` pair, never either field alone**, via
-          :func:`schedule_pair_to_frequency`.
+        * **`scheduleId`**, via :func:`schedule_pair_to_frequency` -- see that
+          function's docstring and `frequency.py`'s module docstring for why the
+          read side now keys on `scheduleId` alone rather than the `(notify,
+          scheduleId)` pair this comment used to describe.
 
         Raises :class:`SavedSearchUnexpectedResponseError` if `searchFilters` is present
         but is not parseable JSON — a malformed record should be visible as an
@@ -107,13 +109,28 @@ class SavedSearchRecord:
                 f"record is missing required key {exc.args[0]!r}: {raw!r}"
             ) from exc
 
+        # 🔴 Review follow-up on PR #11: dict.get("scheduleId") returns None both
+        # when the key is explicitly null (a real, observed "no schedule" state ->
+        # "never") and when the key is missing from the response entirely (a shape
+        # this API has never been observed to send). Collapsing those two into the
+        # same "never" would confidently report notifications as off for a response
+        # this codebase has never actually seen -- exactly the failure this module
+        # exists to prevent. Key presence is checked here, not inside
+        # schedule_pair_to_frequency, so that function's contract stays simple: it
+        # only ever sees a real (possibly null) scheduleId, never has to reason
+        # about absence itself.
+        if "scheduleId" not in raw:
+            notification_frequency: Frequency = "unknown"
+        else:
+            notification_frequency = schedule_pair_to_frequency(raw.get("notify"), raw.get("scheduleId"))
+
         return cls(
             saved_search_id=saved_search_id,
             name=name,
             search_mode=search_mode,
             search_filters=search_filters,
             search_url=search_url,
-            notification_frequency=schedule_pair_to_frequency(raw.get("notify"), raw.get("scheduleId")),
+            notification_frequency=notification_frequency,
             new_listings_count=raw.get("newListingsSinceCertainDate") or 0,
             created_at=raw.get("createdDate"),
             last_update=raw.get("lastUpdate"),
